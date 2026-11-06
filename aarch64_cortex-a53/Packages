@@ -1,0 +1,43 @@
+Package: dnswatchd
+Version: 0.1.0-r1
+Depends: libc, dnsmasq
+Source: /home/runner/work/dnswatchd/dnswatchd/dnswatchd
+SourceName: dnswatchd
+License: MIT
+LicenseFiles: LICENSE
+Section: net
+SourceDateEpoch: 1793951474
+URL: https://github.com/AIerlIz/dnswatchd
+Maintainer: AIerlIz
+Architecture: all
+Installed-Size: 30720
+Description:  dnswatchd continuously probes dnsmasq's upstream DNS servers and validates
+ that the answers land in the expected address range (f.ex. a clash fake-ip
+ range for proxy upstreams, or outside it for direct upstreams). When the
+ preferred upstream stops answering correctly it switches dnsmasq's
+ upstream via --servers-file, and switches back once the upstream recovers.
+ 
+ Only ONE server line is ever written to the servers-file: dnsmasq queries
+ multiple upstreams concurrently, which would mix fake-ip and real IPs and
+ break transparent proxying.
+Filename: aarch64_cortex-a53/dnswatchd_0.1.0-r1_all.ipk
+Size: 7481
+SHA256sum: f87e3a163d8f72c1a505d6aeadf275363a243b456183d042194e2455f1740e99
+
+Package: luci-app-dnswatchd
+Version: 0.1.0-r1
+Depends: libc, dnswatchd, luci-base
+Source: /home/runner/work/dnswatchd/dnswatchd/luci-app-dnswatchd
+SourceName: luci-app-dnswatchd
+License: MIT
+Section: luci
+SourceDateEpoch: 1793951474
+URL: https://github.com/openwrt/luci
+Maintainer: OpenWrt LuCI community
+Architecture: all
+Installed-Size: 20480
+Description:  Web UI for the dnswatchd DNS upstream watchdog
+Filename: aarch64_cortex-a53/luci-app-dnswatchd_0.1.0-r1_all.ipk
+Size: 3822
+SHA256sum: 0bbf7cf0d562066a5ed31eb9e94cf9d9ccf40d89f66072b62365f7a3657aabab
+
