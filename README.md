@@ -23,9 +23,13 @@ keeps exactly one server in the pool so the choice is never ambiguous.
 
 ## Requirements
 
-- OpenWrt 23.05, 24.10 or 25.12
-- `dnsmasq` or `dnsmasq-full`
+- OpenWrt 23.05 or 24.10, with `dnsmasq` or `dnsmasq-full`
 - An architecture the feed publishes (see below), or build it yourself
+
+25.12 moved its package manager to `apk`, and this feed publishes `ipk` for
+`opkg`. The source builds unchanged on 25.12, but `opkg install` is not the path
+there and an `apk` feed is not published yet — see
+[Building from source](#building-from-source).
 
 ## Install
 

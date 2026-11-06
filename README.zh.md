@@ -20,9 +20,12 @@ dnsmasq 没有「这个上游在骗我」的概念。dnswatchd 补上这个概�
 
 ## 要求
 
-- OpenWrt 23.05 / 24.10 / 25.12
-- `dnsmasq` 或 `dnsmasq-full`
+- OpenWrt 23.05 或 24.10，`dnsmasq` 或 `dnsmasq-full`
 - feed 支持的架构（见下），或者自己编译
+
+25.12 的包管理器换成了 `apk`，而这个 feed 发布的是给 `opkg` 用的 `ipk`。
+源码在 25.12 上原样可编（见「源码编译」），但那里不走 `opkg install`，
+目前也还没有发布 `apk` feed。
 
 ## 安装
 

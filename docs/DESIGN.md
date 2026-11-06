@@ -123,6 +123,15 @@ The LuCI form itself only writes UCI through the `uci` module; applying goes
 through `dnswatchd apply` (`uci commit` + service reload), so there is exactly
 one write path.
 
+## Packaging and the 25.12 split
+
+OpenWrt 24.10 and earlier consume `ipk` through `opkg`; 25.12 ships `apk`. The
+feed is built on the 24.10 SDK and publishes `ipk`, so it serves 23.05 and
+24.10. The package itself builds unchanged on 25.12 — nothing in it depends on
+the package manager — but installing there needs an `apk` index, which is not
+published. Saying "supports 25.12" without that caveat would be the same kind of
+claim as the old "only ever one upstream".
+
 ## What was deliberately not built
 
 - **DoH / DoT.** A different problem with a different failure mode, and it would
