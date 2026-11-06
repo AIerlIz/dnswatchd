@@ -51,21 +51,7 @@ jobs:
           echo "json/yaml/js OK"
 
       - name: Translation coverage
-        run: |
-          set -e
-          # Every msgid the view uses must have a zh_Hans string, and the counts
-          # must match, or the .lmo build silently ships a half-translated UI.
-          node - <<'EOF'
-          const fs = require('fs');
-          const src = fs.readFileSync('luci-app-dnswatchd/htdocs/luci-static/resources/view/dnswatchd/main.js', 'utf8');
-          const ids = [...new Set([...src.matchAll(/_\((['"])((?:\\.|(?!\1).)*)\1\)/g)].map(m => m[2]))];
-          const po = fs.readFileSync('luci-app-dnswatchd/po/zh_Hans/dnswatchd.po', 'utf8');
-          const entries = [...po.matchAll(/^msgid "(.*)"\nmsgstr "(.*)"$/gm)];
-          const empty = entries.filter(e => e[2] === '').map(e => e[1]);
-          console.log(`msgids in view: ${ids.length}, translated entries: ${entries.length}`);
-          if (empty.length) { console.error('untranslated:', empty); process.exit(1); }
-          if (entries.length < ids.length) { console.error('po is missing strings'); process.exit(1); }
-          EOF
+        run: node scripts/check-translations.js
 
       - name: ShellCheck
         uses: ludeeus/action-shellcheck@2.0.0
