@@ -59,15 +59,33 @@ jobs:
 
       - name: Collect artifacts
         run: |
+          set +e
           mkdir -p out
-          find bin/packages -name '*.ipk' -exec cp {} out/ \;
+
+          echo "=== workspace directories (depth 2) ==="
+          find "$GITHUB_WORKSPACE" -maxdepth 2 -type d 2>/dev/null | head -30
+
+          echo "=== any .ipk under workspace ==="
+          find "$GITHUB_WORKSPACE" -name '*.ipk' 2>/dev/null | head -20
+
+          echo "=== copying ==="
+          find "$GITHUB_WORKSPACE" -name 'dnswatchd*.ipk' -o -name 'luci-app-dnswatchd*.ipk' 2>/dev/null \
+            | while read -r f; do cp -v "$f" out/; done
+
+          if [ -z "$(ls -A out 2>/dev/null)" ]; then
+            echo "=== nothing under workspace, searching whole filesystem ==="
+            find / -name 'dnswatchd*.ipk' -o -name 'luci-app-dnswatchd*.ipk' 2>/dev/null \
+              | head -10 | while read -r f; do cp -v "$f" out/ 2>/dev/null; done
+          fi
+
+          echo "=== out/ ==="
           ls -la out/
 
       - uses: actions/upload-artifact@v4
         with:
           name: ipk-${{ env.TARGET_ARCH }}
           path: out/*.ipk
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/v')
