@@ -2,70 +2,55 @@
 
 [简体中文](README.zh-CN.md) | **English**
 
-A DNS upstream watchdog for OpenWrt. It probes the upstream, checks what comes
-back, and switches when the answers stop being correct.
+Watches dnsmasq's upstream and switches when the answers go wrong.
 
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
----
-
-## The problem
-
-A common setup:
+## Why this exists
 
 ```
-clients -> main router dnsmasq -> side router (clash, fake-ip transparent proxy) -> upstream DNS
+clients -> router dnsmasq -> a VM running clash in fake-ip mode -> upstream
 ```
 
-When the side router dies (VM shutdown, clash crash, PVE reboot), dnsmasq keeps
-sending queries to an address that no longer answers. The whole network loses DNS.
+Reboot that VM for a kernel update and dnsmasq keeps querying an address that
+no longer answers. DNS dies network-wide until you notice and fix it by hand.
 
-Configuring two upstreams does not fix this:
+Adding a second upstream makes it worse. dnsmasq sends to all upstreams at once
+and uses whichever replies first. One returns fake-ip addresses, the other
+returns real ones. Whichever wins the race decides whether proxying works for
+that lookup, so it breaks about half the time and looks like flaky networking.
 
-> dnsmasq queries all upstreams **concurrently and takes whichever answers first**.
->
-> A proxy upstream returns `198.18.x.x` (fake-ip). A direct upstream returns a
-> real IP. Fastest wins, so the answer changes from query to query: proxying
-> works intermittently and is very hard to diagnose.
+## What it does
 
----
+It checks where the answer lands, not just whether a reply arrived. And when it
+switches, it writes exactly one `server=` line into dnsmasq's servers-file.
 
-## What dnswatchd does instead
+dnsmasq reloads that file on `SIGHUP`. No process restart, no DNS gap.
 
-It validates the answer rather than just checking whether a reply arrived, and
-it writes exactly one `server=` line when switching, never several.
+## The check
 
-The `--servers-file` always holds a single line. dnsmasq reloads it on `SIGHUP`,
-so the switch does not restart the process.
+A side router fails in two ways that look nothing alike:
 
----
-
-## Why checking the answer matters
-
-A side router fails in two different ways:
-
-| Failure | What dnsmasq sees | Timeout-only watchdog |
+| Failure | What dnsmasq sees | A timeout-only watchdog |
 |---|---|---|
-| VM off / link down | query times out | detects it |
-| **clash crashed, dnsmasq still alive** | **returns a wrong answer immediately** | **cannot detect it** |
+| VM down, or the link is gone | nothing, query times out | catches it |
+| clash crashed, dnsmasq still up | a wrong answer, immediately | catches nothing |
 
-In the second case the port is still open and `nslookup` exits 0, but the reply
-is a direct answer with a real IP. Proxying has silently stopped working.
+The second one is the annoying case. Port is open, `nslookup` exits 0, and the
+reply is a real IP because proxying quietly stopped. Nothing looks broken.
 
-The check:
+The probe therefore reads the answer:
 
 ```
-proxy upstream:  probe www.google.com -> answer must fall inside 198.18.0.0/16
-direct upstream: probe www.baidu.com  -> answer must fall outside 198.18.0.0/16
+proxy upstream:  ask www.google.com -> answer must land inside 198.18.0.0/16
+direct upstream: ask www.baidu.com  -> answer must land outside 198.18.0.0/16
 ```
 
-A wrong answer means the upstream is unhealthy, whether or not the port responds.
-
----
+Wrong range, unhealthy upstream, regardless of whether the port answers.
 
 ## Install
 
-### From the feed
+From the feed:
 
 ```sh
 wget -O /etc/opkg/dnswatchd.conf https://AIerlIz.github.io/dnswatchd/dnswatchd.conf
@@ -74,50 +59,33 @@ opkg install dnswatchd
 opkg install luci-app-dnswatchd   # optional web UI
 ```
 
-### From source
+From source, inside your SDK:
 
 ```sh
-# inside your OpenWrt SDK
 echo "src-git dnswatchd https://github.com/AIerlIz/dnswatchd.git" >> feeds.conf.default
 ./scripts/feeds update dnswatchd
 ./scripts/feeds install -a -p dnswatchd
 make package/dnswatchd/compile V=s
 ```
 
-The package lands in `bin/packages/<arch>/dnswatchd/`. `PKGARCH:=all`, so it is
-architecture independent.
+The ipk lands in `bin/packages/<arch>/dnswatchd/`. `PKGARCH:=all`, so the
+architecture does not matter.
 
----
+## Setup
 
-## Prerequisites
-
-Check both before configuring. Without them the switch either does nothing or
-fights with UCI:
+Check these two first. Without them the switch does nothing, or fights with UCI:
 
 ```sh
-# 1. dnsmasq must have servers-file enabled (the install script sets this;
-#    recheck after an upgrade)
 uci get dhcp.@dnsmasq[0].serversfile
-# expected: /tmp/dnsmasq.servers
+# want: /tmp/dnsmasq.servers
 
-# 2. the UCI server list must be empty, or dnsmasq queries both sources
 uci get dhcp.@dnsmasq[0].server
-# expected: an error, or empty
+# want: an error, or empty
 ```
 
----
+The install script fills in both. On upgrade, check them again.
 
-## Getting started
-
-The install script (`/etc/uci-defaults/90-dnswatchd`) does four things:
-
-1. backs up the existing `dhcp.@dnsmasq[0].server` to `/etc/dnswatchd.servers.bak`
-2. seeds `/tmp/dnsmasq.servers` with the first address from that backup
-3. clears the UCI `server` list so `--servers-file` takes over
-4. copies that first address into `dnswatchd.primary.address`
-
-**`enabled` defaults to `0`, so nothing runs after install.** Observe in dry-run
-for a day first:
+Then leave it in dry-run for a day:
 
 ```sh
 uci set dnswatchd.main.dry_run='1'
@@ -126,11 +94,16 @@ uci set dnswatchd.main.interval='30'
 uci commit dnswatchd
 /etc/init.d/dnswatchd restart
 
-# watch the decisions without applying them
 logread -f -e dnswatchd
 ```
 
-Once the verdicts look right, turn dry-run off:
+`enabled` defaults to `0`, so nothing runs until you set it.
+
+The script backs up your old `dhcp.@dnsmasq[0].server` to
+`/etc/dnswatchd.servers.bak`, seeds `/tmp/dnsmasq.servers` from the first entry,
+clears the UCI list, and copies that address into `dnswatchd.primary.address`.
+
+Once the verdicts look sane:
 
 ```sh
 uci set dnswatchd.main.dry_run='0'
@@ -138,31 +111,29 @@ uci commit dnswatchd
 /etc/init.d/dnswatchd restart
 ```
 
----
-
-## Configuration
+## Config
 
 `/etc/config/dnswatchd`:
 
 ```uci
 config dnswatchd 'main'
 	option enabled '1'                 # master switch
-	option interval '30'               # probe interval in seconds, minimum 5
-	option timeout '1'                 # per-probe timeout in seconds
-	option fail_threshold '2'          # consecutive failures before DOWN
-	option recover_threshold '2'       # consecutive successes before UP
+	option interval '30'               # seconds, minimum 5
+	option timeout '1'                 # per-probe timeout
+	option fail_threshold '2'          # consecutive fails before DOWN
+	option recover_threshold '2'       # consecutive oks before UP
 	option servers_file '/tmp/dnsmasq.servers'
 	option selection 'priority'        # priority | latency
-	option latency_samples '3'         # latency only: ping samples
-	option latency_margin '20'         # latency only: required speedup, percent
-	option latency_switch_after '2'    # latency only: consecutive wins needed
-	option dry_run '0'                 # log decisions, do not apply
+	option latency_samples '3'         # latency: ping samples
+	option latency_margin '20'         # latency: required speedup, percent
+	option latency_switch_after '2'    # latency: consecutive wins
+	option dry_run '0'
 	option syslog '1'
 	option verbose '0'
 
 config upstream 'primary'
 	option enabled '1'
-	option type 'proxy'                # proxy | direct, informational only
+	option type 'proxy'                # proxy | direct, label only
 	option address '192.168.10.2'
 	option port '53'
 	option probe_domain 'www.google.com'
@@ -181,102 +152,87 @@ config upstream 'fallback'
 	option priority '20'
 ```
 
-Add as many `upstream` sections as you need.
+Add as many `upstream` sections as you want.
 
----
+## Picking an upstream
 
-## Selection modes
-
-### `priority` (default)
-
-Walk the upstreams in ascending `priority` order and take the first healthy one:
+`priority` walks the list in ascending order and takes the first healthy one.
 
 ```
 proxy(10) healthy     -> use it
-proxy(10) down        -> try aliyun(20)  -> use if healthy
-aliyun(20) down too   -> try tencent(30) -> use if healthy
-all unhealthy         -> leave servers-file untouched
+proxy(10) down        -> aliyun(20) healthy? use it
+aliyun(20) down too   -> tencent(30) healthy? use it
+nothing healthy       -> leave the servers-file alone
 ```
 
-### `latency`
-
-Probe every upstream, keep the healthy ones, measure ping RTT to each, and pick
-the fastest:
+`latency` probes everything, keeps the healthy ones, pings each, takes the
+fastest.
 
 ```
 healthy:  proxy(10) 49ms, aliyun(20) 28ms, tencent(30) 0.6ms
-chosen:   tencent, despite having the highest priority number
+chosen:   tencent
 ```
 
-Three anti-flap guards, all configurable:
+It will not switch over every small win. A challenger has to beat the incumbent
+by `latency_margin` percent, and then keep winning for `latency_switch_after`
+rounds.
 
-| Option | Default | Effect |
+| Option | Default | Meaning |
 |---|---|---|
-| `latency_margin` | 20 | a new candidate must be at least this much faster before it is considered |
-| `latency_switch_after` | 2 | it must then win this many consecutive rounds |
-| `latency_samples` | 3 | ping samples averaged per measurement |
+| `latency_margin` | 20 | required speedup, in percent |
+| `latency_switch_after` | 2 | consecutive rounds the challenger must win |
 
-When the current upstream stops being healthy, the first two guards are skipped
-and the switch happens immediately.
+Neither applies once the incumbent has gone unhealthy, since there is then
+nothing to protect.
 
-### Two constraints on `latency`
+`latency` mode needs the upstream to answer ICMP. `1.1.1.1`, `223.5.5.5` and
+`119.29.29.29` do. Some corporate resolvers do not; those are not dropped, just
+ranked last with a fake RTT of `99999`.
 
-1. **The upstream must answer ICMP.** `1.1.1.1`, `223.5.5.5` and `119.29.29.29`
-   do. Some corporate resolvers and anything behind a firewall will not. Such an
-   upstream is not excluded (it still resolves DNS), but its RTT is recorded as
-   `99999` and it sorts last.
-2. **The probe point must reach the upstream directly.** Inside an environment
-   that hijacks all UDP/53 (the side router itself, for example), the
-   "can it resolve" test and the RTT both become meaningless.
+It also needs the probe to reach the upstream directly. Run it inside something
+that hijacks UDP/53 and both the resolve test and the RTT become fiction.
 
-### Why ping and not DNS response time
+### Why ping
 
-busybox `date +%s%N` returns whole seconds on OpenWrt (measured: `1793954264`),
-so shell cannot time a DNS round trip that takes tens of milliseconds.
+busybox `date +%s%N` returns whole seconds on OpenWrt (I measured `1793954264`),
+so there is no way to time a DNS round trip in shell.
 
-Ping RTT is the only latency signal available. It measures network round-trip
-time, which tracks DNS response time closely; the difference is server-side
-processing, usually a few milliseconds.
+Ping RTT is what is left. It is the network leg of the round trip; the server
+adds a few milliseconds on top.
 
-### Which mode to use
+### Which mode
 
-| Situation | Use |
-|---|---|
-| side router plus one or two fallbacks | `priority`: side router first, fall back when it dies |
-| several public resolvers, want the fastest | `latency`: pick among them automatically |
-| unstable latency, frequent flapping | `priority`: avoids repeated switching |
+- Side router plus a fallback or two: `priority`. You want the side router and
+  nothing else.
+- Several public resolvers, no strong preference: `latency`.
+- Latency keeps moving around: `priority`. Less switching.
 
----
-
-## Command line
+## CLI
 
 ```sh
-# one pass, for debugging
-/usr/sbin/dnswatchd once
-
-# current state
-/usr/sbin/dnswatchd status
-# active: primary
-# servers-file: /tmp/dnsmasq.servers
-#   # managed by dnswatchd - do not edit
-#   server=192.168.10.2
-# --- primary ---
-#   fails=0
-#   oks=7
-#   status=up
-# --- fallback ---
-#   fails=6
-#   oks=0
-#   status=down
-
-# probe one upstream by hand
+/usr/sbin/dnswatchd once      # one pass
+/usr/sbin/dnswatchd status    # where it thinks it is
 /usr/sbin/dnswatchd probe 192.168.10.2 www.google.com 198.18.0.0/16 in
-# OK
 ```
 
----
+`status` output:
 
-## How it works
+```
+active: primary
+servers-file: /tmp/dnsmasq.servers
+  # managed by dnswatchd - do not edit
+  server=192.168.10.2
+--- primary ---
+  fails=0
+  oks=7
+  status=up
+--- fallback ---
+  fails=6
+  oks=0
+  status=down
+```
+
+## Internals
 
 ```
 every interval seconds:
@@ -285,77 +241,61 @@ every interval seconds:
 
   probe(addr, domain, cidr, mode)
     nslookup -type=A -timeout=T -retry=1 <domain> <addr>
-    take the last Address line, check whether it falls inside or outside cidr
+    take the last Address line, check it against cidr
 
-  state machine with hysteresis
-    ok   -> oks++,  fails=0; oks  >= recover_threshold -> status=up
-    fail -> fails++, oks=0;  fails >= fail_threshold   -> status=down
+  hysteresis
+    ok   -> oks++,  fails=0; oks  >= recover_threshold -> up
+    fail -> fails++, oks=0;  fails >= fail_threshold   -> down
 
-  first upstream with status=up wins
+  first upstream marked up wins
 
-  when it differs from the active one:
+  if it differs from the active one:
     echo "server=<addr>" > /tmp/dnsmasq.servers
     kill -HUP $(pidof dnsmasq)
     echo "<section>" > /var/run/dnswatchd/active
 ```
 
-**Why `--servers-file` instead of UCI**: `uci set` plus a service reload restarts
-dnsmasq and drops DNS for 1-2 seconds. `--servers-file` with `SIGHUP` is the
-mechanism dnsmasq provides for changing upstreams at runtime, and it leaves
-`/etc/config/dhcp` untouched.
+`--servers-file` instead of `uci set` because a service reload restarts dnsmasq
+and drops DNS for a second or two. `SIGHUP` is the hook dnsmasq provides for
+exactly this, and it leaves `/etc/config/dhcp` alone.
 
-**Why only one `server=` line**: dnsmasq merges entries from `--server` and
-`--servers-file`. Writing two puts you back on the concurrent-query path that
-breaks fake-ip.
+One line only, because dnsmasq merges `--server` with `--servers-file`. Two
+entries puts you back on the concurrent path that breaks fake-ip.
 
----
-
-## Comparison
+## Compared to other tools
 
 | | dnswatchd | felipecrs/dns-watchdog | watchcat | dnsdist | smartdns |
 |---|---|---|---|---|---|
-| Validates the answer | yes | no, timeout only | no, ICMP only | `mustResolve` only | no |
-| Single-server switching | yes | yes | - | yes | no, concurrent queries |
-| No DNS interruption | yes, SIGHUP | no, `service network reload` | - | yes | yes |
-| LuCI interface | yes | no | yes | no | yes |
-| Standard opkg package | yes | no, install script | yes | yes | yes |
+| Checks the answer | yes | no, timeout only | no, ICMP only | `mustResolve` only | no |
+| Switches to one server | yes | yes | - | yes | no, queries in parallel |
+| No DNS gap | yes, SIGHUP | no, `service network reload` | - | yes | yes |
+| LuCI | yes | no | yes | no | yes |
+| opkg package | yes | no, install script | yes | yes | yes |
 | Size | ~20 KB | ~5 KB | ~30 KB | 2.4 MB | 4 MB |
 
----
+## When it breaks
 
-## Troubleshooting
-
-**Logs keep showing `no healthy upstream`**
+**`no healthy upstream` forever**
 
 ```sh
-# run one probe by hand and read the output
 /usr/sbin/dnswatchd probe 192.168.10.2 www.google.com 198.18.0.0/16 in
-
-# see what dnsmasq actually receives
 nslookup www.google.com 192.168.10.2
 ```
 
-If the manual `nslookup` returns a real IP instead of `198.18.x.x`, either
-clash's fake-ip is not active or a rule sends that domain DIRECT. Change
-`probe_domain`.
+If the manual lookup gives a real IP instead of `198.18.x.x`, fake-ip is off or
+a rule sends that domain DIRECT. Change `probe_domain`.
 
-**It switched but DNS still fails**
+**It switched, DNS still dead**
 
 ```sh
-# confirm dnsmasq really loaded servers-file
-ps w | grep [d]nsmasq
-# the command line should include --servers-file=/tmp/dnsmasq.servers
-
-# confirm the UCI server list is empty
-uci show dhcp.@dnsmasq[0].server
+ps w | grep [d]nsmasq     # should show --servers-file=/tmp/dnsmasq.servers
+uci show dhcp.@dnsmasq[0].server   # should be empty
 ```
 
-**It flaps between upstreams**
+**It flips back and forth**
 
-Raise `fail_threshold` and `recover_threshold`, or shorten `interval` so the
-verdict responds faster.
-
----
+Raise `fail_threshold` and `recover_threshold`. Shortening `interval` also
+helps, up to a point.
 
 ## License
 
