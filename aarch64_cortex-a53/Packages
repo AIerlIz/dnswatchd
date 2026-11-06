@@ -6,14 +6,14 @@ SourceName: dnswatchd
 License: MIT
 LicenseFiles: LICENSE
 Section: net
-SourceDateEpoch: 1793964668
+SourceDateEpoch: 1793964767
 URL: https://github.com/AIerlIz/dnswatchd
 Maintainer: AIerlIz
 Architecture: all
 Installed-Size: 30720
 Filename: dnswatchd_0.1.0-r1_all.ipk
 Size: 9786
-SHA256sum: 0a433b673a84e872497cdb5d2b755ae0057c9f2a89a61139a75c54aa67822b45
+SHA256sum: 6039004f5a45a3c1b8dff7a11f4a46065c0f238a8e50122d87b9bbbfc9e2370a
 Description:  dnswatchd continuously probes dnsmasq's upstream DNS servers and validates
  that the answers land in the expected address range (f.ex. a clash fake-ip
  range for proxy upstreams, or outside it for direct upstreams). When the
@@ -31,13 +31,13 @@ Source: /home/runner/work/dnswatchd/dnswatchd/luci-app-dnswatchd
 SourceName: luci-app-dnswatchd
 License: MIT
 Section: luci
-SourceDateEpoch: 1793964668
+SourceDateEpoch: 1793964767
 URL: https://github.com/openwrt/luci
 Maintainer: OpenWrt LuCI community
 Architecture: all
 Installed-Size: 20480
 Filename: luci-app-dnswatchd_0.1.0-r1_all.ipk
-Size: 5650
-SHA256sum: 8e3e412f386d8d4b4e9a9053b1b6d343edc5a98f8b5ced56f6e10bacd5a744b6
+Size: 5644
+SHA256sum: e04ce8f43ca49cd58e14e6c65ad6cb8bd75d0dc07b42249e2eef3e52f736087c
 Description:  Web UI for the dnswatchd DNS upstream watchdog
 
