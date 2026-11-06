@@ -198,7 +198,12 @@ jobs:
 
             if [ -f control ]; then
               cat control
-              printf 'Filename: aarch64_cortex-a53/%s\n' "$f"
+              # control 文件末尾通常没有换行，不补的话会和下面的 Filename: 粘成一行，
+              # opkg 就解析不到 Filename 字段（"does not have a valid filename field"）
+              printf '\n'
+              # Filename 必须相对于 feed 的基准 URL（src/gz 里那个），
+              # 也就是只写文件名本身；写 aarch64_cortex-a53/xxx.ipk 会拼成双层目录
+              printf 'Filename: %s\n' "$f"
               printf 'Size: %s\n' "$(stat -c%s "$BASE/$f")"
               printf 'SHA256sum: %s\n\n' "$(sha256sum "$BASE/$f" | awk '{print $1}')"
             else
