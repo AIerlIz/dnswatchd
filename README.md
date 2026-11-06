@@ -121,6 +121,10 @@ config dnswatchd 'main'
 	option fail_threshold '2'          # 连续失败几次判定 DOWN
 	option recover_threshold '2'       # 连续成功几次判定 UP（回切）
 	option servers_file '/tmp/dnsmasq.servers'
+	option selection 'priority'        # priority | latency
+	option latency_samples '3'         # 仅 latency：ping 采样次数
+	option latency_margin '20'         # 仅 latency：新候选要快多少 % 才切
+	option latency_switch_after '2'    # 仅 latency：连续赢几轮才切
 	option dry_run '0'                 # 只记录不切换
 	option syslog '1'
 	option verbose '0'
@@ -146,7 +150,58 @@ config upstream 'fallback'
 	option priority '20'
 ```
 
-`upstream` 段可以加任意多个，按 `priority` 升序尝试，第一个健康的会被写入 servers-file。
+`upstream` 段可以加任意多个。
+
+### 选择策略：`priority` 还是 `latency`
+
+**`priority`（默认，可预测）**
+
+按每个 upstream 的 `priority` 升序逐个探测，**第一个健康的胜出**：
+
+```
+proxy(10) 健康      → 用它
+proxy(10) 挂了      → 试 aliyun(20) → 通就用
+aliyun(20) 也挂了   → 试 tencent(30) → 通就用
+全都不通            → servers-file 保持不动（不清空）
+```
+
+**`latency`（按 ping RTT 选最快的）**
+
+先探测所有 upstream，把**健康的**挑出来，再对它们逐个测 ping RTT，**选最快的**：
+
+```
+healthy:  proxy(10) 49ms, aliyun(20) 28ms, tencent(30) 0.6ms
+选中:     tencent（虽然它的 priority 最大，但 RTT 最快）
+```
+
+**三条防抖规则**（都在配置里可调）：
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `latency_margin` | 20 | 新候选要比当前**快 20% 以上**才考虑切换。防止 1ms 波动就来回跳 |
+| `latency_switch_after` | 2 | 新候选要**连续赢 2 轮**才真的切 |
+| `latency_samples` | 3 | ping 采几次取 avg |
+
+**当前上游变得不健康时，两条规则都不生效，立即切换。**
+
+### `latency` 模式的两个前提
+
+1. **上游必须响应 ICMP**。`1.1.1.1` / `223.5.5.5` / `119.29.29.29` 都响应；某些企业 DNS 或防火墙后不响应。不响应的上游**不会被排除**（它确实能解析 DNS），只是 RTT 记为 `99999` 排在最后。
+2. **探测点必须能直达上游**。如果跑在一个劫持了所有 UDP/53 的透明代理环境里（比如旁路由自己），"能不能解析"的判定会失真，RTT 也是假的。
+
+### 为什么用 ping 而不是直接测 DNS 响应时间
+
+busybox 的 `date +%s%N` **只给秒**（实测：`date +%s%N` → `1793954264`），shell 里拿不到亚秒精度，没法测几十毫秒级的 DNS 往返。
+
+`ping` 的 RTT 是当前唯一可用的延迟指标，它反映**网络路径往返时间**，和 DNS 响应时间高度相关（差异主要在服务端处理，通常几毫秒）。
+
+### 什么时候该用哪个
+
+| 场景 | 建议 |
+|---|---|
+| 旁路由 + 一两个兜底 DNS | **priority** —— 你就是要"旁路由优先，挂了才降级" |
+| 多个公共 DNS 想用最快的 | **latency** —— 比如阿里/腾讯/CF 三选一自动挑 |
+| 网络延迟不稳定、经常抖动 | **priority** —— 避免频繁切换 |
 
 ### 必须先满足的两件事
 

@@ -25,9 +25,17 @@ SERVERS_FILE="/tmp/dnsmasq.servers"
 DRY_RUN=0
 USE_SYSLOG=1
 VERBOSE=0
+# 选择策略：priority（默认，按 uci priority 升序）| latency（按 ping RTT 优选）
+SELECTION="priority"
+# 延迟优选的采样与防抖参数
+LATENCY_SAMPLES=3
+LATENCY_MARGIN=20
+LATENCY_SWITCH_AFTER=2
 
 log() {
-	[ "$USE_SYSLOG" = "1" ] && logger -t "$LOG_TAG" "$*"
+	# -- 是必需的：消息本身可能以 '-' 开头（例如 "--- RTT ranking ---"），
+	# 不加的话 busybox logger 会把它当成命令行选项。
+	[ "$USE_SYSLOG" = "1" ] && logger -t "$LOG_TAG" -- "$*"
 	[ "$VERBOSE" = "1" ] && echo "$(date '+%F %T') $*" >&2
 	return 0
 }
@@ -214,6 +222,145 @@ apply_upstream() {
 	return 0
 }
 
+# ---------------------------------------------------------------- 延迟测量
+
+# 测量到某个地址的 RTT（毫秒，取 ping 的 avg）。失败返回 1。
+# busybox 的 date 没有亚秒精度（date +%s%N 只给秒），所以只能用 ping 的 RTT
+# 作为延迟代理指标 —— 它反映网络路径往返时间，和 DNS 响应时间高度相关。
+measure_rtt() {
+	local addr="$1"
+	local out rtt
+
+	out=$(ping -c "$LATENCY_SAMPLES" -W 2 -q "$addr" 2>/dev/null) || return 1
+	[ -n "$out" ] || return 1
+
+	# busybox ping -q 输出：
+	#   round-trip min/avg/max = 49.906/49.906/49.906 ms
+	#   rtt min/avg/max/mdev = 1.234/1.567/1.890/0.123 ms
+	# 取 avg（第 2 个数）
+	rtt=$(echo "$out" | sed -n 's/.*= \([0-9.]*\)\/\([0-9.]*\)\/[0-9.]*.*/\2/p' | head -1)
+	[ -n "$rtt" ] || return 1
+
+	echo "$rtt"
+}
+
+# 防抖：新候选要连续 LATENCY_SWITCH_AFTER 次胜出才真的切。
+# 返回 0 = 可以切；返回 1 = 还在观察
+inc_challenger() {
+	local candidate="$1"
+	local cf="$STATE_DIR/challenger.count"
+	local lf="$STATE_DIR/challenger.section"
+	local count=0 prev_cand=""
+
+	[ -f "$cf" ] && count=$(cat "$cf" 2>/dev/null)
+	[ -f "$lf" ] && prev_cand=$(cat "$lf" 2>/dev/null)
+
+	# 换了候选就重新计数
+	[ "$prev_cand" != "$candidate" ] && count=0
+
+	count=$((count + 1))
+	echo "$count" > "$cf"
+	echo "$candidate" > "$lf"
+
+	if [ "$count" -ge "$LATENCY_SWITCH_AFTER" ]; then
+		log "latency: '$candidate' won $count/$LATENCY_SWITCH_AFTER rounds in a row -> promoting"
+		echo 0 > "$cf"
+		return 0
+	fi
+
+	log "latency: '$candidate' won $count/$LATENCY_SWITCH_AFTER rounds; still observing"
+	return 1
+}
+
+# 按延迟优选：探测所有、测 RTT、选最快的，并带防抖
+select_by_latency() {
+	local list="$1" prev="$2"
+	local section addr port domain cidr mode type pri
+	local healthy="$STATE_DIR/healthy.list"
+	local measured="$STATE_DIR/measured.list"
+	local healthy_count=0
+
+	: > "$healthy"
+
+	# 1. 探测，只留健康的
+	while IFS='|' read -r pri section addr port domain cidr mode type; do
+		[ -n "$addr" ] || continue
+		if check_one "$section" "$addr" "$port" "$domain" "$cidr" "$mode"; then
+			printf '%s|%s|%s\n' "$pri" "$section" "$addr" >> "$healthy"
+			healthy_count=$((healthy_count + 1))
+		fi
+	done <<-EOF
+	$(sort -t'|' -k1,1n "$list")
+	EOF
+
+	if [ "$healthy_count" -eq 0 ]; then
+		log "no healthy upstream this round; keeping previous '${prev:-none}'"
+		return 0
+	fi
+
+	# 2. 给每个健康的上游测 RTT
+	: > "$measured"
+	while IFS='|' read -r pri section addr; do
+		local rtt
+		rtt=$(measure_rtt "$addr") || rtt=""
+		if [ -n "$rtt" ]; then
+			printf '%s|%s|%s|%s\n' "$rtt" "$pri" "$section" "$addr" >> "$measured"
+		else
+			# ICMP 被拦时 ping 拿不到 RTT，把它排在最后但不排除（它确实能解析 DNS）
+			printf '99999|%s|%s|%s\n' "$pri" "$section" "$addr" >> "$measured"
+			log "WARN: cannot measure RTT to '$addr' (ICMP blocked?), ranking it last"
+		fi
+	done < "$healthy"
+
+	# 3. 选 RTT 最小的；RTT 相同则 priority 小的优先
+	local best best_rtt best_section best_addr
+	best=$(sort -t'|' -k1,1n -k2,2n "$measured" | head -1)
+	best_rtt=$(echo "$best" | cut -d'|' -f1)
+	best_section=$(echo "$best" | cut -d'|' -f3)
+	best_addr=$(echo "$best" | cut -d'|' -f4)
+
+	# 4. 防抖
+	if [ -n "$prev" ] && [ "$best_section" != "$prev" ]; then
+		local prev_rtt threshold
+		prev_rtt=$(awk -F'|' -v s="$prev" '$3 == s { print $1; exit }' "$measured")
+
+		if [ -n "$prev_rtt" ] && [ "$prev_rtt" != "99999" ]; then
+			threshold=$(awk -v p="$prev_rtt" -v m="$LATENCY_MARGIN" 'BEGIN { printf "%.2f", p * (100 - m) / 100 }')
+			if awk -v b="$best_rtt" -v t="$threshold" 'BEGIN { exit !(b < t) }'; then
+				inc_challenger "$best_section" || return 0
+			else
+				log "latency: '$best_section' ${best_rtt}ms vs current '$prev' ${prev_rtt}ms — not ${LATENCY_MARGIN}% faster (needs <${threshold}ms), staying"
+				return 0
+			fi
+		else
+			# 当前上游已经不健康或测不到 RTT —— 立即切
+			log "latency: previous '$prev' not usable this round; switching immediately"
+		fi
+	fi
+
+	# 5. 应用
+	if [ "$best_section" != "$prev" ]; then
+		if apply_upstream "$best_addr"; then
+			echo "$best_section" > "$STATE_DIR/active"
+			echo 0 > "$STATE_DIR/challenger.count"
+			log "SWITCH(latency): ${prev:-none} -> $best_section ($best_addr, ${best_rtt}ms)"
+		fi
+	else
+		[ "$VERBOSE" = "1" ] && log "stable on '$best_section' ($best_addr, ${best_rtt}ms)"
+	fi
+
+	[ "$VERBOSE" = "1" ] && {
+		log "--- RTT ranking ---"
+		# 用管道而不是 < "$(sort ...)"：后者是把命令替换的结果当成文件名，
+		# 会报 "No such file or directory"
+		sort -t'|' -k1,1n "$measured" | while IFS='|' read -r r p s a; do
+			log "  ${r}ms  $s ($a, priority=$p)"
+		done
+	}
+
+	return 0
+}
+
 # ---------------------------------------------------------------- 采集
 
 collect_upstreams() {
@@ -262,7 +409,13 @@ run_once() {
 		return 0
 	fi
 
-	# 按 priority 升序尝试，第一个健康的胜出
+	# 延迟优选模式：先探所有，再测 RTT 选最快的（带防抖）
+	if [ "$SELECTION" = "latency" ]; then
+		select_by_latency "$list" "$prev"
+		return 0
+	fi
+
+	# 优先级模式：按 priority 升序，第一个健康的胜出
 	while IFS='|' read -r pri section addr port domain cidr mode type; do
 		[ -n "$addr" ] || continue
 		if check_one "$section" "$addr" "$port" "$domain" "$cidr" "$mode"; then
@@ -306,15 +459,33 @@ load_config() {
 	config_get_bool USE_SYSLOG  main syslog         1
 	config_get_bool VERBOSE     main verbose        0
 
+	# 选择策略：priority（默认）| latency
+	config_get SELECTION          main selection             "priority"
+	config_get LATENCY_SAMPLES    main latency_samples       3
+	config_get LATENCY_MARGIN     main latency_margin        20
+	config_get LATENCY_SWITCH_AFTER main latency_switch_after 2
+
 	case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=30 ;; esac
 	case "$TIMEOUT"  in ''|*[!0-9]*) TIMEOUT=1 ;; esac
 	case "$FAIL_TH"  in ''|*[!0-9]*) FAIL_TH=2 ;; esac
 	case "$RECOVER_TH" in ''|*[!0-9]*) RECOVER_TH=2 ;; esac
+	case "$LATENCY_SAMPLES" in ''|*[!0-9]*) LATENCY_SAMPLES=3 ;; esac
+	case "$LATENCY_MARGIN"  in ''|*[!0-9]*) LATENCY_MARGIN=20 ;; esac
+	case "$LATENCY_SWITCH_AFTER" in ''|*[!0-9]*) LATENCY_SWITCH_AFTER=2 ;; esac
+
+	case "$SELECTION" in
+		priority|latency) ;;
+		*) log "unknown selection '$SELECTION', falling back to priority"; SELECTION="priority" ;;
+	esac
 
 	[ "$INTERVAL" -ge 5 ] || { log "interval too small, clamping to 5"; INTERVAL=5; }
 	[ "$TIMEOUT" -ge 1 ] || TIMEOUT=1
 	[ "$FAIL_TH" -ge 1 ] || FAIL_TH=1
 	[ "$RECOVER_TH" -ge 1 ] || RECOVER_TH=1
+	[ "$LATENCY_SAMPLES" -ge 1 ] || LATENCY_SAMPLES=1
+	[ "$LATENCY_SAMPLES" -le 10 ] || LATENCY_SAMPLES=10
+	[ "$LATENCY_MARGIN" -le 90 ] || LATENCY_MARGIN=90
+	[ "$LATENCY_SWITCH_AFTER" -ge 1 ] || LATENCY_SWITCH_AFTER=1
 
 	return 0
 }

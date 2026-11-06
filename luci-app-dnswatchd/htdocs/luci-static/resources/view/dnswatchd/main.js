@@ -139,6 +139,39 @@ return view.extend({
 		o.default = '/tmp/dnsmasq.servers';
 		o.rmempty = false;
 
+		/* ---------- 选择策略 ---------- */
+
+		o = s.option(form.ListValue, 'selection', _('选择策略'));
+		o.value('priority', _('按优先级（可预测，默认）'));
+		o.value('latency', _('按延迟（ping RTT 最快的）'));
+		o.default = 'priority';
+		o.rmempty = false;
+		o.description = _('按优先级：按每个上游的「优先级」升序，第一个健康的胜出。' +
+			'按延迟：先探测所有健康的上游，再对它们测 ping RTT，选最快的；' +
+			'要求上游响应 ICMP，不响应的会被排在最后。');
+
+		o = s.option(form.Value, 'latency_samples', _('延迟采样次数'),
+			_('仅「按延迟」时生效。ping 几次取平均，1-10。'));
+		o.datatype = 'range(1,10)';
+		o.placeholder = '3';
+		o.default = '3';
+		o.depends('selection', 'latency');
+
+		o = s.option(form.Value, 'latency_margin', _('切换阈值（%）'),
+			_('仅「按延迟」时生效。新候选要比当前快这么多百分比才考虑切换，' +
+			  '避免 1ms 的波动就把上游切来切去。0 = 只要更快就切。'));
+		o.datatype = 'range(0,90)';
+		o.placeholder = '20';
+		o.default = '20';
+		o.depends('selection', 'latency');
+
+		o = s.option(form.Value, 'latency_switch_after', _('连续胜出几轮才切'),
+			_('仅「按延迟」时生效。新候选要连续赢这么多次才真的切换。1 = 立刻切（容易抖）。'));
+		o.datatype = 'range(1,10)';
+		o.placeholder = '2';
+		o.default = '2';
+		o.depends('selection', 'latency');
+
 		o = s.option(form.Flag, 'syslog', _('写入系统日志'));
 		o.rmempty = false;
 		o.default = '1';
