@@ -1,50 +1,15 @@
 # dnswatchd
 
-OpenWrt 上的 DNS 上游看门狗。探测 dnsmasq 的上游，检查应答落在哪个网段，不对就切换。
+OpenWrt 包。探测 dnsmasq 的上游，校验应答落在哪个网段，不对就切换。
 
-## 起因
+## 约束
 
-家里是这样的结构：
+dnsmasq 的 `--server` 和 `--servers-file` 里的条目会合并生效。所以：
 
-```
-客户端 → 主路由 dnsmasq → 旁路由（clash，fake-ip）→ 上游
-```
+- `--servers-file` 里只写一行 `server=`
+- UCI 里的 `server` 列表必须为空
 
-旁路由是台 VM。更新内核重启它，dnsmasq 就一直往那个地址发查询，全网的 DNS 挂了，
-得自己发现、自己上去修。
-
-想配两个上游省事，结果更糟。dnsmasq 会把查询同时发给所有上游、用最先回的那个。
-一个上游返 fake-ip，另一个返真实 IP，谁先到就决定这次查询走不走代理。一半时候能用，
-看起来像网络不稳，翻日志也看不出所以然。
-
-后来写了个脚本盯着，反复改了几轮，做成包。
-
-## 关键约束
-
-dnsmasq 的 `--server` 和 `--servers-file` 里的条目会**合并生效**。所以：
-
-- `--servers-file` 里永远只写一行 `server=`
-- UCI 里的 `server` 列表必须清空
-
-只要同时存在两条，就回到并发查询、fake-ip 被冲掉的状态。安装脚本会自动处理这两件事，
-升级后建议自己再确认一遍。
-
-## 检查什么
-
-旁路由出问题有两种，表现完全不一样：
-
-- **VM 关机 / 链路断** —— 查询超时，任何看门狗都能发现。
-- **clash 崩了，dnsmasq 还活着** —— 立刻返回错答案，端口开着，`nslookup` 退出码 0，
-  返回的是真实 IP。代理已经悄悄不工作了，但表面上一切正常。
-
-第二种是写这个项目的真正原因。所以探针看内容：
-
-```
-代理型上游：查 www.google.com → 答案必须在 198.18.0.0/16 内
-直连型上游：查 www.baidu.com  → 答案必须在 198.18.0.0/16 外
-```
-
-落在错的段就不健康，端口通不通不算数。
+同时存在两条就会并发查询。
 
 ## 安装
 
@@ -52,78 +17,59 @@ dnsmasq 的 `--server` 和 `--servers-file` 里的条目会**合并生效**。�
 wget -O /etc/opkg/dnswatchd.conf https://AIerlIz.github.io/dnswatchd/dnswatchd.conf
 opkg update
 opkg install dnswatchd
-opkg install luci-app-dnswatchd   # 想要 Web 界面就装这个
+opkg install luci-app-dnswatchd   # Web 界面，可选
 ```
 
-自己编：
+源码编译：
 
 ```sh
-cd openwrt-sdk
 echo "src-git dnswatchd https://github.com/AIerlIz/dnswatchd.git" >> feeds.conf.default
 ./scripts/feeds update dnswatchd
 ./scripts/feeds install -a -p dnswatchd
 make package/dnswatchd/compile V=s
 ```
 
-产物是 `PKGARCH:=all`，任何架构通用。
+`PKGARCH:=all`。
 
-安装脚本（`/etc/uci-defaults/90-dnswatchd`）会做这几件事，跑一次就完：
+### 安装脚本
 
-1. 把现有的 `dhcp.@dnsmasq[0].server` 存一份到 `/etc/dnswatchd.servers.bak`
-2. 用第一条初始化 `/tmp/dnsmasq.servers`，保证迁移瞬间 DNS 不断
-3. 清空 UCI 的 `server` 列表
-4. 打开 `dhcp.@dnsmasq[0].serversfile`
-5. 把那个地址填进 `dnswatchd.primary.address`
+`/etc/uci-defaults/90-dnswatchd` 装完跑一次，靠 `/etc/dnswatchd.migrated` 标记保证幂等：
+
+1. 把 `dhcp.@dnsmasq[0].server` 写到 `/etc/dnswatchd.servers.bak`
+2. 用第一条初始化 `servers_file`，写一行 `server=<地址>`
+3. 逐条删除 UCI 的 `server`
+4. `dhcp.@dnsmasq[0].serversfile` 设为同一路径
+5. 把该地址填进 `dnswatchd.primary.address`（原地址带 `#端口` 则同时填 `port`）
 6. 重启 dnsmasq
-7. 写 `/etc/dnswatchd.migrated` 标记，以后不再跑
+7. 写标记文件
 
-如果原来的上游是 `127.0.0.1` 这类本地地址，不会迁移过去（那是别的软件的事），
-servers-file 会先填 `223.5.5.5` 兜底。
+首条地址是 `127.*` 或 `::1` 时跳过迁移，`servers_file` 填 `223.5.5.5`。
 
-**装完默认不启用**（`enabled '0'`）。
-
-## 先跑 dry-run
-
-```sh
-uci set dnswatchd.main.enabled='1'
-uci set dnswatchd.main.dry_run='1'
-uci commit dnswatchd
-/etc/init.d/dnswatchd restart
-
-logread -f -e dnswatchd
-```
-
-只看日志不动手。确认判定符合预期了再关掉：
-
-```sh
-uci set dnswatchd.main.dry_run='0'
-uci commit dnswatchd
-/etc/init.d/dnswatchd restart
-```
+`enabled` 默认 `0`。
 
 ## 配置
 
-`/etc/config/dnswatchd`，完整的一份：
+`/etc/config/dnswatchd`：
 
 ```uci
 config dnswatchd 'main'
-	option enabled '0'                 # 总开关，装完默认关
+	option enabled '0'                 # 总开关
 	option interval '30'               # 探测间隔（秒），最小 5
 	option timeout '1'                 # 单次 nslookup 超时（秒）
 	option fail_threshold '2'          # 连续失败几次算 DOWN
 	option recover_threshold '2'       # 连续成功几次算 UP
 	option servers_file '/tmp/dnsmasq.servers'
 
-	option selection 'priority'        # priority 或 latency
+	option selection 'priority'        # priority | latency
 
-	# 只在 selection='latency' 时有用
-	option latency_samples '3'         # ping 采几次
-	option latency_margin '20'         # 比现在快多少百分点才考虑切
-	option latency_switch_after '2'    # 还要连续赢几轮
+	# 以下三项仅 selection='latency'
+	option latency_samples '3'         # ping 采样次数，1-10
+	option latency_margin '20'         # 比当前快多少百分点才考虑切换，0-90
+	option latency_switch_after '2'    # 连续赢几轮才切
 
-	option dry_run '0'
+	option dry_run '0'                 # 只写日志，不改 servers-file
 	option syslog '1'
-	option verbose '0'                 # 1 = 「稳定在某上游」也写日志
+	option verbose '0'                 # 1 时「稳定在某上游」也记日志
 
 config upstream 'primary'
 	option enabled '1'
@@ -133,7 +79,7 @@ config upstream 'primary'
 	option probe_domain 'www.google.com'
 	option expect_cidr '198.18.0.0/16'
 	option expect_mode 'in'            # in | not-in
-	option priority '10'               # 数字小的先用
+	option priority '10'
 
 config upstream 'fallback'
 	option enabled '1'
@@ -146,51 +92,78 @@ config upstream 'fallback'
 	option priority '20'
 ```
 
-`upstream` 段想加几个加几个。`expect_cidr` 留空就只要求能解析出 A 记录，不校验内容。
+`upstream` 段数量不限。
 
-LuCI 里在**服务 → DNS Watchdog**，界面顶部有 13 个常用公共 DNS 的预设，
-选一个点「添加到上游列表」会自动建好一条，优先级取当前最大值 +10。
-不想用预设在下面的表格里手填也行。
+`expect_cidr` 留空时只要求能解析出 A 记录，不校验内容。
 
-## 两种选法
+`probe_domain` 默认 `www.baidu.com`，`expect_mode` 默认 `in`，`priority` 默认 `10`，`port` 默认 `53`。
 
-`priority`：按数字从小到大试，第一个健康的就用。全都不健康就不动 servers-file。
+### LuCI
+
+菜单在 `服务 → DNS Watchdog`（`/admin/services/dnswatchd`）。
+
+「常规设置」里有 13 个公共 DNS 的预设，选中后点「添加到上游列表」会新建一条
+`upstream`，`priority` 取当前最大值 +10。地址已存在时不添加。下面的表格可以手填任意条目。
+
+## 探测
+
+每次探测：
 
 ```
-proxy(10) 通了       → 用 proxy
-proxy(10) 挂了       → 试 fallback(20)
-两个都挂             → 什么都不做，保持原样
+nslookup -type=A -timeout=<timeout> -retry=1 <probe_domain> <address>[#port]
 ```
 
-`latency`：全部探一遍，留健康的，一个个 ping，取最快的。
+取输出中最后一个 `Address:` 行的 IPv4，与 `expect_cidr` 比对：
+
+- `expect_mode='in'`：必须落在 `expect_cidr` 内
+- `expect_mode='not-in'`：必须落在 `expect_cidr` 外
+- `expect_cidr` 为空：解析出 IPv4 即通过
+
+每个上游的状态存在 `/var/run/dnswatchd/<section>.state`，内容为 `ST_FAILS`、`ST_OKS`、
+`ST_STATUS` 三项：
 
 ```
-proxy(10) 49ms, fallback(20) 28ms, third(30) 0.6ms
-→ 选 third，虽然它 priority 最大
+探测成功 → oks++,  fails=0；oks  >= recover_threshold → up
+探测失败 → fails++, oks=0；fails >= fail_threshold   → down
 ```
 
-不是稍微快一点就切。新候选要比现在快 `latency_margin` 个百分点，再连续赢
-`latency_switch_after` 轮才算数。当前上游已经不健康时这两条都不管，直接切。
+当前激活的上游存在 `/var/run/dnswatchd/active`。
 
-`latency` 有两个前提：
+## 选法
 
-- 上游要回 ICMP。`1.1.1.1`、`223.5.5.5`、`119.29.29.29` 都回，部分企业 DNS 不回。
-  不回的不排除，只是记一个 `99999` 排在最后。
-- 探针要能直接到上游。跑在劫持了 UDP/53 的环境里，能不能解析和 RTT 都不可信。
+`priority`：按 `priority` 升序逐个探测，第一个 `up` 的胜出。全都不 `up` 时不改 servers-file。
 
-至于为什么用 ping 而不是直接测 DNS 响应时间：busybox 的 `date +%s%N` 在 OpenWrt
-上只到秒（实测 `1793954264`），shell 里测不了几十毫秒。ping 的 RTT 是网络那一段往返，
-服务端处理再加几毫秒。
+`latency`：探测全部上游，保留 `up` 的，逐个 `ping -c <latency_samples> -W 2 -q` 取 avg RTT，
+按 `(RTT, priority)` 升序取第一个。
 
-## 命令行
+切换到新候选需要同时满足：
+
+- 新候选 RTT < 当前 RTT × (100 - `latency_margin`) / 100
+- 连续赢 `latency_switch_after` 轮
+
+当前上游不在 `up` 列表里时两条都跳过。
+
+`ping` 失败（ICMP 不通）的上游 RTT 记为 `99999`，排最后但不排除。
+
+## 应用切换
+
+```sh
+printf '# managed by dnswatchd - do not edit\nserver=%s\n' <address> > /tmp/dnsmasq.servers.tmp.$$
+mv /tmp/dnsmasq.servers.tmp.$$ /tmp/dnsmasq.servers
+kill -HUP $(pidof dnsmasq)
+```
+
+`dry_run='1'` 时只写日志，不落盘不 HUP。
+
+## 命令
 
 ```sh
 /usr/sbin/dnswatchd once
 /usr/sbin/dnswatchd status
-/usr/sbin/dnswatchd probe 192.168.10.2 www.google.com 198.18.0.0/16 in
+/usr/sbin/dnswatchd probe <address> <domain> [cidr] [mode]
 ```
 
-`status` 长这样：
+`once` 跑一轮。`status` 输出：
 
 ```
 active: primary
@@ -201,48 +174,38 @@ servers-file: /tmp/dnsmasq.servers
   fails:  0
   oks:    7
   status: up
---- fallback ---
-  fails:  6
-  oks:    0
-  status: down
 ```
 
-状态文件在 `/var/run/dnswatchd/`，重启清空，计数从零开始。
+`probe` 输出 `OK` 或 `FAIL`，退出码对应 0/1。
 
-## 内部
+`status` 和 `probe` 会先加载配置；配置加载失败时用内置默认值继续。
 
-```
-每 interval 秒：
+## 主循环
 
-  按 priority 顺序（或全部）遍历 upstream
+```sh
+load_config || exit 0
+mkdir -p /var/run/dnswatchd
+trap 'exit 0' TERM INT
 
-  probe(addr, port, domain, cidr, mode)
-    nslookup -type=A -timeout=T -retry=1 <domain> <addr>
-    取最后一个 Address 行，跟 cidr 比
-
-  带滞回
-    ok   → oks++,  fails=0；oks  >= recover_threshold → up
-    fail → fails++, oks=0；fails >= fail_threshold   → down
-
-  第一个 up 的胜出
-
-  跟当前激活的不一样才动手：
-    echo "server=<addr>" > /tmp/dnsmasq.servers
-    kill -HUP $(pidof dnsmasq)
-    echo "<section>" > /var/run/dnswatchd/active
+while true; do
+	run_once
+	sleep "$interval" &
+	wait $!
+done
 ```
 
-用 `--servers-file` 而不是 `uci set` + reload，是因为后者要重启 dnsmasq，DNS 断一两秒。
-`SIGHUP` 是 dnsmasq 给动态上游留的口子，而且不碰 `/etc/config/dhcp`，不会跟手改的配置打架。
+procd 拉起，`respawn 3600 5 5`，`START=95`。
 
-## 已知问题
+收到 `reload` 时 `stop` + `start`。
 
-- **必须有 dnsmasq 2.86 以上**（`--servers-file` 从那个版本开始）。
-- **只能跑在能直达上游的那台机器上**。放在旁路由自己去探外网，结果没意义。
-- `latency` 模式下不响应 ICMP 的上游会排最后，哪怕它实际解析很快。
-- 纯 shell，没有 Lua 也没有 ucode 依赖，但也就没有并发，上游多的时候一轮会慢一点
-  （6 个上游 × 3 次 ping 大约 5 秒）。
-- `interval` 最小 5 秒，再小没意义（一轮探测本身就要几秒）。
+## 代码里的边界处理
+
+- `interval` 小于 5 时钳到 5；非数字回落到 30
+- `timeout`、`fail_threshold`、`recover_threshold`、`latency_switch_after` 小于 1 时钳到 1
+- `latency_samples` 限制在 1-10，`latency_margin` 上限 90
+- `selection` 不是 `priority`/`latency` 时回落到 `priority` 并记一条日志
+- `apply_upstream` 写临时文件后 `mv`，失败时删临时文件并返回 1
+- `dnsmasq` 未运行时写文件但不发 HUP，记一条 WARN
 
 ## 许可
 
