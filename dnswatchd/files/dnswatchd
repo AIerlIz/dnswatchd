@@ -1,552 +1,376 @@
 #!/bin/sh
+# SPDX-License-Identifier: MIT
 #
 # dnswatchd - DNS upstream watchdog for OpenWrt
 #
-# 持续探测 dnsmasq 的上游 DNS，验证应答内容是否落在预期网段内，
-# 失联时把 dnsmasq 的上游从主服务器切到备用服务器，恢复后自动切回。
+# Probes dnsmasq's upstream resolvers and validates that the answers land where
+# they should. When the preferred upstream stops answering correctly it rewrites
+# dnsmasq's --servers-file to the next candidate and reloads it.
 #
-# 只用 --servers-file 里的单一 server 行（绝不并列多个），
-# 因为 dnsmasq 对多个 upstream 会并发查询，会让 fake-ip 与真实 IP 混用。
+# Exactly ONE server line is ever written: dnsmasq picks among its configured
+# upstreams on its own, so a second one (from `list server`, or from
+# resolv.conf.auto while noresolv=0) means we no longer control which resolver
+# answers — and in a fake-ip setup that is how real addresses leak in.
 #
-# SPDX-License-Identifier: MIT
+# Commands:
+#   (none)      run the watch loop (this is what procd starts)
+#   once        run a single round
+#   status      show what is going on        [--json]
+#   probe       one-shot probe               <addr> <domain> [cidr] [mode] [port]
+#   takeover    hand dnsmasq over to dnswatchd
+#   rollback    put dnsmasq back                [--from TIMESTAMP]
+#   apply       commit staged UCI and restart  (used by the LuCI front end)
 
-. /lib/functions.sh
+: "${DNSWATCHD_LIB:=/usr/lib/dnswatchd}"
 
-PROG="dnswatchd"
-LOG_TAG="dnswatchd"
-STATE_DIR="/var/run/dnswatchd"
+# OpenWrt's UCI helpers; overridable so the test harness can drive the real
+# entry point with its own shim instead of a live uci binary.
+: "${DNSWATCHD_FUNCTIONS:=/lib/functions.sh}"
+# shellcheck source=/dev/null
+[ -f "$DNSWATCHD_FUNCTIONS" ] && . "$DNSWATCHD_FUNCTIONS"
 
-# 运行期配置（由 load_config 填充）
-INTERVAL=30
-TIMEOUT=1
-FAIL_TH=2
-RECOVER_TH=2
-SERVERS_FILE="/tmp/dnsmasq.servers"
-DRY_RUN=0
-USE_SYSLOG=1
-VERBOSE=0
-# 选择策略：priority（默认，按 uci priority 升序）| latency（按 ping RTT 优选）
-SELECTION="priority"
-# 延迟优选的采样与防抖参数
-LATENCY_SAMPLES=3
-LATENCY_MARGIN=20
-LATENCY_SWITCH_AFTER=2
+# shellcheck source=/dev/null
+. "$DNSWATCHD_LIB/common.sh"
+# shellcheck source=/dev/null
+. "$DNSWATCHD_LIB/config.sh"
+# shellcheck source=/dev/null
+. "$DNSWATCHD_LIB/state.sh"
+# shellcheck source=/dev/null
+. "$DNSWATCHD_LIB/probe.sh"
+# shellcheck source=/dev/null
+. "$DNSWATCHD_LIB/apply.sh"
+# shellcheck source=/dev/null
+. "$DNSWATCHD_LIB/select.sh"
+# shellcheck source=/dev/null
+. "$DNSWATCHD_LIB/takeover.sh"
 
-log() {
-	# -- 是必需的：消息本身可能以 '-' 开头（例如 "--- RTT ranking ---"），
-	# 不加的话 busybox logger 会把它当成命令行选项。
-	[ "$USE_SYSLOG" = "1" ] && logger -t "$LOG_TAG" -- "$*"
-	[ "$VERBOSE" = "1" ] && echo "$(date '+%F %T') $*" >&2
-	return 0
+usage() {
+	cat >&2 <<'EOF'
+usage: dnswatchd [command]
+
+  (none)                                   run the watch loop
+  once                                     run one round
+  status [--json]                          show state
+  probe <addr> <domain> [cidr] [mode] [port]
+  switch <section>                         force a specific upstream
+  takeover                                 take dnsmasq over
+  rollback [--from TIMESTAMP]              give it back
+  apply                                    commit staged UCI and restart
+EOF
 }
 
-# ---------------------------------------------------------------- 网络工具
+# ---------------------------------------------------------------- status
 
-# IPv4 → 32 位整数
-ip2int() {
-	local a b c d
-	local IFS=.
-	# shellcheck disable=SC2086
-	set -- $1
-	[ $# -eq 4 ] || return 1
-	a=$1 b=$2 c=$3 d=$4
-	# 每段必须是 0-255 的十进制
-	for o in $a $b $c $d; do
-		case "$o" in
-			''|*[!0-9]*) return 1 ;;
-		esac
-		[ "$o" -le 255 ] || return 1
-	done
-	echo $(( (a << 24) | (b << 16) | (c << 8) | d ))
+json_escape() {
+	printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
 }
 
-# $1=IP  $2=CIDR  → 命中返回 0
-cidr_match() {
-	local ip="$1" cidr="$2"
-	local net prefix ipn netn mask
+status_json() {
+	_l="$STATE_DIR/status.list"
+	ensure_state_dir
+	_n=$(collect_upstreams "$_l")
 
-	case "$ip" in
-		*.*.*.*) ;;
-		*) return 1 ;;
+	_managed=false
+	[ -f "$MARKER" ] && _managed=true
+
+	_t=$(active_target)
+	_a_addr=${_t%%#*}
+	_a_port=53
+	case "$_t" in
+		*\#*) _a_port=${_t##*#} ;;
 	esac
+	[ -n "$_a_addr" ] || _a_addr=""
 
-	case "$cidr" in
-		*/*) ;;
-		*) return 1 ;;
-	esac
+	_enabled=0
+	[ "$CFG_ENABLED" = "1" ] && _enabled=1
 
-	net=${cidr%%/*}
-	prefix=${cidr##*/}
+	printf '{"ok":true,"version":"%s","enabled":%d,"managed":%s' \
+		"$VERSION" "$_enabled" "$_managed"
+	printf ',"servers_file":"%s","selection":"%s"' \
+		"$(json_escape "$SERVERS_FILE")" "$SELECTION"
+	printf ',"active":{"section":"%s","address":"%s","port":%s}' \
+		"$(active_section "$_l")" "$_a_addr" "$_a_port"
+	# What dnsmasq currently looks like, so the UI can show the wizard without
+	# being granted read access to /etc/config/dhcp itself.
+	if command -v uci >/dev/null 2>&1; then
+		printf ',"dhcp":{"servers":['
 
-	case "$prefix" in
-		''|*[!0-9]*) return 1 ;;
-	esac
-	[ "$prefix" -le 32 ] || return 1
+		_i=0
+		_f2=1
+		while [ "$_i" -lt 32 ]; do
+			_s=$(uci -q get "dhcp.@dnsmasq[0].server[$_i]" 2>/dev/null)
+			[ -n "$_s" ] || break
+			[ "$_f2" = "1" ] || printf ','
+			_f2=0
+			printf '"%s"' "$(json_escape "$_s")"
+			_i=$((_i + 1))
+		done
 
-	ipn=$(ip2int "$ip") || return 1
-	netn=$(ip2int "$net") || return 1
+		printf '],"serversfile":"%s","noresolv":"%s"}' \
+			"$(json_escape "$(uci -q get dhcp.@dnsmasq[0].serversfile 2>/dev/null)")" \
+			"$(json_escape "$(uci -q get dhcp.@dnsmasq[0].noresolv 2>/dev/null)")"
+	fi
 
-	if [ "$prefix" -eq 0 ]; then
+	printf ',"upstreams":['
+
+	_first=1
+	while IFS='|' read -r pri sec addr port dom cidr mode; do
+		[ -n "$addr" ] || continue
+		state_read "$sec"
+		[ "$_first" = "1" ] || printf ','
+		_first=0
+		printf '{"section":"%s","address":"%s","port":%s,"priority":%s' \
+			"$(json_escape "$sec")" "$(json_escape "$addr")" "$port" "$pri"
+		printf ',"probe_domain":"%s","expect_cidr":"%s","expect_mode":"%s"' \
+			"$(json_escape "$dom")" "$(json_escape "$cidr")" "$(json_escape "$mode")"
+		printf ',"status":"%s","fails":%s,"oks":%s,"rtt":"%s"}' \
+			"$ST_STATUS" "$ST_FAILS" "$ST_OKS" "$ST_RTT"
+	done < "$_l"
+
+	printf ']}\n'
+}
+
+status_text() {
+	_l="$STATE_DIR/status.list"
+	ensure_state_dir
+	_n=$(collect_upstreams "$_l")
+
+	if [ "$CFG_ENABLED" = "1" ]; then
+		say "enabled:      yes"
+	else
+		say "enabled:      no"
+	fi
+
+	if [ -f "$MARKER" ]; then
+		say "managing:     yes (since $(cat "$MARKER" 2>/dev/null))"
+	else
+		say "managing:     no — run 'dnswatchd takeover' to take dnsmasq over"
+	fi
+
+	say "servers-file: $SERVERS_FILE"
+	_t=$(active_target)
+	if [ -n "$_t" ]; then
+		say "active:       $(active_section "$_l") ($_t)"
+	else
+		say "active:       none ($SERVERS_FILE is missing or has no server line)"
+	fi
+	say "selection:    $SELECTION"
+	say ""
+
+	if [ "$_n" -eq 0 ]; then
+		say "no enabled upstream configured"
 		return 0
 	fi
-	mask=$(( (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF ))
 
-	[ $(( ipn & mask )) -eq $(( netn & mask )) ]
+	say "UPSTREAM        ADDRESS            PORT  PRI  STATUS   FAILS  OKS  RTT"
+
+	# Sort into a file first: `< "$(sort ...)"` would treat the command output as
+	# a filename. That exact mistake shipped in 0.1.x.
+	sort -t'|' -k1,1n "$_l" > "$_l.sorted"
+
+	while IFS='|' read -r pri sec addr port dom cidr mode; do
+		[ -n "$addr" ] || continue
+		state_read "$sec"
+		printf '%-15s %-18s %-5s %-4s %-8s %-6s %-4s %s\n' \
+			"$sec" "$addr" "$port" "$pri" "$ST_STATUS" "$ST_FAILS" "$ST_OKS" \
+			"${ST_RTT:+${ST_RTT}ms}"
+	done < "$_l.sorted"
 }
 
-# ---------------------------------------------------------------- 探针
+# ---------------------------------------------------------------- commands
 
-# probe <address> <port> <domain> <cidr> <mode>
-#   mode=in      → 应答必须落在 cidr 内
-#   mode=not-in  → 应答必须落在 cidr 外
-#   cidr 为空    → 只要能解析出 A 记录就算健康
-probe() {
-	local addr="$1" port="$2" domain="$3" cidr="$4" mode="$5"
-	local out ip rc
+cmd_probe() {
+	_p_addr=$1
+	_p_dom=$2
+	_p_cidr=${3:-}
+	_p_mode=${4:-any}
+	_p_port=${5:-53}
 
-	# busybox nslookup 默认用系统服务器，必须显式指定；port 非 53 时用 addr#port
-	local target="$addr"
-	[ -n "$port" ] && [ "$port" != "53" ] && target="${addr}#${port}"
+	[ -n "$_p_addr" ] && [ -n "$_p_dom" ] || {
+		usage
+		return 1
+	}
 
-	# -type=A 是必需的：不加的话 busybox 会优先返回 AAAA，
-	# 在 IPv6 可用的链路上永远拿不到 IPv4 答案。
-	out=$(nslookup -type=A -timeout="$TIMEOUT" -retry=1 "$domain" "$target" 2>/dev/null)
-	rc=$?
-	[ "$rc" -eq 0 ] || return 1
+	probe_one "$_p_addr" "$_p_port" "$_p_dom" "$_p_cidr" "$_p_mode"
+	_rc=$?
+	printf '%s\n' "$P_JSON"
+	return "$_rc"
+}
 
-	# 跳过开头的 "Server: ... / Address: <server>:53" 块，只看应答部分。
-	# 应答部分从第一个 "Name:" 行开始；只在其中有 A 记录（IPv4）时才算解析成功。
-	ip=$(echo "$out" \
-		| sed -n '/^Name:/,$p' \
-		| awk '/^Address:[ \t]/{print $NF}' \
-		| grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' \
-		| tail -1)
-	[ -n "$ip" ] || return 1
+cmd_switch() {
+	_sec=$1
+	[ -n "$_sec" ] || {
+		printf '{"ok":false,"error":"missing section"}\n'
+		return 1
+	}
 
-	[ -z "$cidr" ] && return 0
+	ensure_state_dir
+	_l="$STATE_DIR/switch.list"
+	collect_upstreams "$_l" >/dev/null
 
-	if [ "$mode" = "not-in" ]; then
-		if cidr_match "$ip" "$cidr"; then
-			return 1
-		fi
-		return 0
-	else
-		if cidr_match "$ip" "$cidr"; then
+	while IFS='|' read -r pri sec2 addr port rest; do
+		[ -n "$addr" ] || continue
+		[ "$sec2" = "$_sec" ] || continue
+		if apply_upstream "$addr" "$port"; then
+			printf '{"ok":true,"section":"%s","address":"%s","port":%s}\n' \
+				"$_sec" "$addr" "$port"
 			return 0
 		fi
+		printf '{"ok":false,"error":"apply failed"}\n'
 		return 1
-	fi
-}
+	done < "$_l"
 
-# ---------------------------------------------------------------- 状态
-
-# 每个 upstream 一个状态文件：/var/run/dnswatchd/<section>.state
-# 内容：fails=N oks=M status=up|down|unknown
-
-state_read() {
-	local sf="$STATE_DIR/$1.state"
-	ST_FAILS=0
-	ST_OKS=0
-	ST_STATUS="unknown"
-	if [ -f "$sf" ]; then
-		# shellcheck disable=SC1090
-		. "$sf" 2>/dev/null || true
-	fi
-}
-
-state_write() {
-	local section="$1" sf="$STATE_DIR/$section.state"
-	printf 'ST_FAILS=%s\nST_OKS=%s\nST_STATUS=%s\n' "$ST_FAILS" "$ST_OKS" "$ST_STATUS" > "$sf"
-}
-
-# check_one <section> <addr> <port> <domain> <cidr> <mode>
-# 返回 0 = 该上游当前健康
-check_one() {
-	local section="$1"
-
-	state_read "$section"
-
-	if probe "$2" "$3" "$4" "$5" "$6"; then
-		ST_OKS=$((ST_OKS + 1))
-		ST_FAILS=0
-		if [ "$ST_STATUS" != "up" ] && [ "$ST_OKS" -ge "$RECOVER_TH" ]; then
-			ST_STATUS="up"
-			log "upstream '$section' is UP (ok=$ST_OKS)"
-		fi
-	else
-		ST_FAILS=$((ST_FAILS + 1))
-		ST_OKS=0
-		if [ "$ST_STATUS" != "down" ] && [ "$ST_FAILS" -ge "$FAIL_TH" ]; then
-			ST_STATUS="down"
-			log "upstream '$section' is DOWN (fail=$ST_FAILS)"
-		fi
-	fi
-
-	state_write "$section"
-	[ "$ST_STATUS" = "up" ]
-}
-
-# ---------------------------------------------------------------- 应用
-
-# 写入 servers-file 并让 dnsmasq 平滑重载
-apply_upstream() {
-	local addr="$1"
-
-	if [ "$DRY_RUN" = "1" ]; then
-		log "DRY-RUN: would write 'server=$addr' to $SERVERS_FILE"
-		return 0
-	fi
-
-	local tmp="${SERVERS_FILE}.tmp.$$"
-	printf '# managed by dnswatchd - do not edit\nserver=%s\n' "$addr" > "$tmp" || {
-		log "ERROR: cannot write $tmp"
-		return 1
-	}
-	mv "$tmp" "$SERVERS_FILE" || {
-		log "ERROR: cannot move $tmp to $SERVERS_FILE"
-		rm -f "$tmp"
-		return 1
-	}
-
-	local pid
-	pid=$(pidof dnsmasq)
-	if [ -n "$pid" ]; then
-		kill -HUP $pid 2>/dev/null || {
-			log "ERROR: HUP dnsmasq (pid $pid) failed"
-			return 1
-		}
-		log "applied: server=$addr -> $SERVERS_FILE (dnsmasq pid $pid reloaded)"
-	else
-		log "WARN: dnsmasq is not running; wrote $SERVERS_FILE but did not reload"
-	fi
-	return 0
-}
-
-# ---------------------------------------------------------------- 延迟测量
-
-# 测量到某个地址的 RTT（毫秒，取 ping 的 avg）。失败返回 1。
-# busybox 的 date 没有亚秒精度（date +%s%N 只给秒），所以只能用 ping 的 RTT
-# 作为延迟代理指标 —— 它反映网络路径往返时间，和 DNS 响应时间高度相关。
-measure_rtt() {
-	local addr="$1"
-	local out rtt
-
-	out=$(ping -c "$LATENCY_SAMPLES" -W 2 -q "$addr" 2>/dev/null) || return 1
-	[ -n "$out" ] || return 1
-
-	# busybox ping -q 输出：
-	#   round-trip min/avg/max = 49.906/49.906/49.906 ms
-	#   rtt min/avg/max/mdev = 1.234/1.567/1.890/0.123 ms
-	# 取 avg（第 2 个数）
-	rtt=$(echo "$out" | sed -n 's/.*= \([0-9.]*\)\/\([0-9.]*\)\/[0-9.]*.*/\2/p' | head -1)
-	[ -n "$rtt" ] || return 1
-
-	echo "$rtt"
-}
-
-# 防抖：新候选要连续 LATENCY_SWITCH_AFTER 次胜出才真的切。
-# 返回 0 = 可以切；返回 1 = 还在观察
-inc_challenger() {
-	local candidate="$1"
-	local cf="$STATE_DIR/challenger.count"
-	local lf="$STATE_DIR/challenger.section"
-	local count=0 prev_cand=""
-
-	[ -f "$cf" ] && count=$(cat "$cf" 2>/dev/null)
-	[ -f "$lf" ] && prev_cand=$(cat "$lf" 2>/dev/null)
-
-	# 换了候选就重新计数
-	[ "$prev_cand" != "$candidate" ] && count=0
-
-	count=$((count + 1))
-	echo "$count" > "$cf"
-	echo "$candidate" > "$lf"
-
-	if [ "$count" -ge "$LATENCY_SWITCH_AFTER" ]; then
-		log "latency: '$candidate' won $count/$LATENCY_SWITCH_AFTER rounds in a row -> promoting"
-		echo 0 > "$cf"
-		return 0
-	fi
-
-	log "latency: '$candidate' won $count/$LATENCY_SWITCH_AFTER rounds; still observing"
+	printf '{"ok":false,"error":"unknown section"}\n'
 	return 1
 }
 
-# 按延迟优选：探测所有、测 RTT、选最快的，并带防抖
-select_by_latency() {
-	local list="$1" prev="$2"
-	local section addr port domain cidr mode type pri
-	local healthy="$STATE_DIR/healthy.list"
-	local measured="$STATE_DIR/measured.list"
-	local healthy_count=0
-
-	: > "$healthy"
-
-	# 1. 探测，只留健康的
-	while IFS='|' read -r pri section addr port domain cidr mode type; do
-		[ -n "$addr" ] || continue
-		if check_one "$section" "$addr" "$port" "$domain" "$cidr" "$mode"; then
-			printf '%s|%s|%s\n' "$pri" "$section" "$addr" >> "$healthy"
-			healthy_count=$((healthy_count + 1))
-		fi
-	done <<-EOF
-	$(sort -t'|' -k1,1n "$list")
-	EOF
-
-	if [ "$healthy_count" -eq 0 ]; then
-		log "no healthy upstream this round; keeping previous '${prev:-none}'"
-		return 0
-	fi
-
-	# 2. 给每个健康的上游测 RTT
-	: > "$measured"
-	while IFS='|' read -r pri section addr; do
-		local rtt
-		rtt=$(measure_rtt "$addr") || rtt=""
-		if [ -n "$rtt" ]; then
-			printf '%s|%s|%s|%s\n' "$rtt" "$pri" "$section" "$addr" >> "$measured"
-		else
-			# ICMP 被拦时 ping 拿不到 RTT，把它排在最后但不排除（它确实能解析 DNS）
-			printf '99999|%s|%s|%s\n' "$pri" "$section" "$addr" >> "$measured"
-			log "WARN: cannot measure RTT to '$addr' (ICMP blocked?), ranking it last"
-		fi
-	done < "$healthy"
-
-	# 3. 选 RTT 最小的；RTT 相同则 priority 小的优先
-	local best best_rtt best_section best_addr
-	best=$(sort -t'|' -k1,1n -k2,2n "$measured" | head -1)
-	best_rtt=$(echo "$best" | cut -d'|' -f1)
-	best_section=$(echo "$best" | cut -d'|' -f3)
-	best_addr=$(echo "$best" | cut -d'|' -f4)
-
-	# 4. 防抖
-	if [ -n "$prev" ] && [ "$best_section" != "$prev" ]; then
-		local prev_rtt threshold
-		prev_rtt=$(awk -F'|' -v s="$prev" '$3 == s { print $1; exit }' "$measured")
-
-		if [ -n "$prev_rtt" ] && [ "$prev_rtt" != "99999" ]; then
-			threshold=$(awk -v p="$prev_rtt" -v m="$LATENCY_MARGIN" 'BEGIN { printf "%.2f", p * (100 - m) / 100 }')
-			if awk -v b="$best_rtt" -v t="$threshold" 'BEGIN { exit !(b < t) }'; then
-				inc_challenger "$best_section" || return 0
-			else
-				log "latency: '$best_section' ${best_rtt}ms vs current '$prev' ${prev_rtt}ms — not ${LATENCY_MARGIN}% faster (needs <${threshold}ms), staying"
-				return 0
-			fi
-		else
-			# 当前上游已经不健康或测不到 RTT —— 立即切
-			log "latency: previous '$prev' not usable this round; switching immediately"
-		fi
-	fi
-
-	# 5. 应用
-	if [ "$best_section" != "$prev" ]; then
-		if apply_upstream "$best_addr"; then
-			echo "$best_section" > "$STATE_DIR/active"
-			echo 0 > "$STATE_DIR/challenger.count"
-			log "SWITCH(latency): ${prev:-none} -> $best_section ($best_addr, ${best_rtt}ms)"
-		fi
-	else
-		[ "$VERBOSE" = "1" ] && log "stable on '$best_section' ($best_addr, ${best_rtt}ms)"
-	fi
-
-	[ "$VERBOSE" = "1" ] && {
-		log "--- RTT ranking ---"
-		# 用管道而不是 < "$(sort ...)"：后者是把命令替换的结果当成文件名，
-		# 会报 "No such file or directory"
-		sort -t'|' -k1,1n "$measured" | while IFS='|' read -r r p s a; do
-			log "  ${r}ms  $s ($a, priority=$p)"
-		done
+cmd_apply() {
+	command -v uci >/dev/null 2>&1 || {
+		err "uci not found"
+		return 1
 	}
 
+	if ! uci -q commit dnswatchd; then
+		err "uci commit dnswatchd failed"
+		return 1
+	fi
+
+	if [ -x /etc/init.d/dnswatchd ]; then
+		/etc/init.d/dnswatchd reload >/dev/null 2>&1 || {
+			err "/etc/init.d/dnswatchd reload failed"
+			return 1
+		}
+	else
+		log "no init script; config committed but no service to reload"
+	fi
+
+	say "committed"
 	return 0
 }
 
-# ---------------------------------------------------------------- 采集
-
-collect_upstreams() {
-	local list="$1"
-
-	_handle_upstream() {
-		local section="$1"
-		local enabled type address port domain cidr mode pri
-
-		config_get_bool enabled "$section" enabled 1
-		[ "$enabled" = "1" ] || return 0
-
-		config_get type         "$section" type         "direct"
-		config_get address      "$section" address      ""
-		config_get port         "$section" port         "53"
-		config_get domain       "$section" probe_domain "www.baidu.com"
-		config_get cidr         "$section" expect_cidr  ""
-		config_get mode         "$section" expect_mode  "in"
-		config_get pri          "$section" priority     "10"
-
-		[ -n "$address" ] || return 0
-
-		printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
-			"$pri" "$section" "$address" "$port" "$domain" "$cidr" "$mode" "$type" >> "$list"
+daemon_loop() {
+	load_config || {
+		log "disabled in /etc/config/dnswatchd; exiting"
+		exit 0
 	}
 
-	: > "$list"
-	config_foreach _handle_upstream upstream
-}
+	ensure_state_dir
 
-# ---------------------------------------------------------------- 主循环
+	log "started: interval=${INTERVAL}s deadline=${PROBE_DEADLINE}ms fail=${FAIL_TH} recover=${RECOVER_TH} selection=${SELECTION} servers_file=${SERVERS_FILE}"
 
-run_once() {
-	local list="$STATE_DIR/upstreams.list"
-	local prev=""
-	local section addr port domain cidr mode type pri
-	local chosen_section=""
-	local chosen_addr=""
+	trap 'log "received TERM, exiting"; exit 0' TERM INT
 
-	[ -f "$STATE_DIR/active" ] && prev=$(cat "$STATE_DIR/active" 2>/dev/null)
-
-	collect_upstreams "$list"
-
-	if [ ! -s "$list" ]; then
-		log "no enabled upstream configured; nothing to do"
-		return 0
-	fi
-
-	# 延迟优选模式：先探所有，再测 RTT 选最快的（带防抖）
-	if [ "$SELECTION" = "latency" ]; then
-		select_by_latency "$list" "$prev"
-		return 0
-	fi
-
-	# 优先级模式：按 priority 升序，第一个健康的胜出
-	while IFS='|' read -r pri section addr port domain cidr mode type; do
-		[ -n "$addr" ] || continue
-		if check_one "$section" "$addr" "$port" "$domain" "$cidr" "$mode"; then
-			chosen_section="$section"
-			chosen_addr="$addr"
-			break
-		fi
-	done <<-EOF
-	$(sort -t'|' -k1,1n "$list")
-	EOF
-
-	if [ -z "$chosen_section" ]; then
-		log "no healthy upstream this round; keeping previous '${prev:-none}'"
-		return 0
-	fi
-
-	if [ "$chosen_section" != "$prev" ]; then
-		if apply_upstream "$chosen_addr"; then
-			echo "$chosen_section" > "$STATE_DIR/active"
-			log "SWITCH: ${prev:-none} -> $chosen_section ($chosen_addr)"
-		fi
-	else
-		[ "$VERBOSE" = "1" ] && log "stable on '$chosen_section' ($chosen_addr)"
-	fi
-	return 0
-}
-
-load_config() {
-	config_load dnswatchd
-
-	local enabled
-	config_get_bool enabled main enabled 1
-	[ "$enabled" = "1" ] || return 1
-
-	config_get INTERVAL     main interval          30
-	config_get TIMEOUT      main timeout           1
-	config_get FAIL_TH      main fail_threshold    2
-	config_get RECOVER_TH   main recover_threshold 2
-	config_get SERVERS_FILE main servers_file      "/tmp/dnsmasq.servers"
-	config_get_bool DRY_RUN     main dry_run        0
-	config_get_bool USE_SYSLOG  main syslog         1
-	config_get_bool VERBOSE     main verbose        0
-
-	# 选择策略：priority（默认）| latency
-	config_get SELECTION          main selection             "priority"
-	config_get LATENCY_SAMPLES    main latency_samples       3
-	config_get LATENCY_MARGIN     main latency_margin        20
-	config_get LATENCY_SWITCH_AFTER main latency_switch_after 2
-
-	case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=30 ;; esac
-	case "$TIMEOUT"  in ''|*[!0-9]*) TIMEOUT=1 ;; esac
-	case "$FAIL_TH"  in ''|*[!0-9]*) FAIL_TH=2 ;; esac
-	case "$RECOVER_TH" in ''|*[!0-9]*) RECOVER_TH=2 ;; esac
-	case "$LATENCY_SAMPLES" in ''|*[!0-9]*) LATENCY_SAMPLES=3 ;; esac
-	case "$LATENCY_MARGIN"  in ''|*[!0-9]*) LATENCY_MARGIN=20 ;; esac
-	case "$LATENCY_SWITCH_AFTER" in ''|*[!0-9]*) LATENCY_SWITCH_AFTER=2 ;; esac
-
-	case "$SELECTION" in
-		priority|latency) ;;
-		*) log "unknown selection '$SELECTION', falling back to priority"; SELECTION="priority" ;;
-	esac
-
-	[ "$INTERVAL" -ge 5 ] || { log "interval too small, clamping to 5"; INTERVAL=5; }
-	[ "$TIMEOUT" -ge 1 ] || TIMEOUT=1
-	[ "$FAIL_TH" -ge 1 ] || FAIL_TH=1
-	[ "$RECOVER_TH" -ge 1 ] || RECOVER_TH=1
-	[ "$LATENCY_SAMPLES" -ge 1 ] || LATENCY_SAMPLES=1
-	[ "$LATENCY_SAMPLES" -le 10 ] || LATENCY_SAMPLES=10
-	[ "$LATENCY_MARGIN" -le 90 ] || LATENCY_MARGIN=90
-	[ "$LATENCY_SWITCH_AFTER" -ge 1 ] || LATENCY_SWITCH_AFTER=1
-
-	return 0
-}
-
-# ---------------------------------------------------------------- 入口
-
-case "$1" in
-	once)
-		# 单次运行（调试 / cron 场景）
-		load_config || exit 0
-		mkdir -p "$STATE_DIR"
-		run_once
-		exit 0
-		;;
-	status)
-		load_config >/dev/null 2>&1 || true
-		mkdir -p "$STATE_DIR"
-		echo "active: $(cat "$STATE_DIR/active" 2>/dev/null || echo none)"
-		echo "servers-file: $SERVERS_FILE"
-		[ -f "$SERVERS_FILE" ] && sed 's/^/  /' "$SERVERS_FILE"
-		for f in "$STATE_DIR"/*.state; do
-			[ -f "$f" ] || continue
-			echo "--- $(basename "$f" .state) ---"
-			sed -e 's/^ST_FAILS=/  fails:  /' \
-			    -e 's/^ST_OKS=/  oks:    /' \
-			    -e 's/^ST_STATUS=/  status: /' "$f"
-		done
-		exit 0
-		;;
-	probe)
-		# 手工探测：dnswatchd probe <addr> <domain> [cidr] [mode]
-		load_config >/dev/null 2>&1 || true
-		if probe "$2" "53" "$3" "$4" "${5:-in}"; then
-			echo "OK"
-			exit 0
+	while :; do
+		if lock_acquire; then
+			run_round
+			lock_release
 		else
-			echo "FAIL"
-			exit 1
+			log "another round is in progress; skipping this tick"
 		fi
-		;;
+
+		sleep "$INTERVAL" &
+		wait $!
+	done
+}
+
+# ---------------------------------------------------------------- dispatch
+
+CMD=$1
+[ $# -gt 0 ] && shift
+
+case "$CMD" in
 	"")
+		daemon_loop
 		;;
+
+	once)
+		_json=0
+		[ "${1:-}" = "--json" ] && _json=1
+
+		load_config || {
+			[ "$_json" = "1" ] && printf '{"ok":false,"error":"disabled"}\n'
+			exit 0
+		}
+
+		ensure_state_dir
+
+		if ! lock_acquire; then
+			[ "$_json" = "1" ] && printf '{"ok":false,"error":"busy"}\n'
+			log "another round is in progress; skipping"
+			exit 0
+		fi
+
+		run_round
+		_rc=$?
+		lock_release
+
+		if [ "$_json" = "1" ]; then
+			status_json
+		else
+			status_text
+		fi
+		exit "$_rc"
+		;;
+
+	status)
+		_json=0
+		[ "${1:-}" = "--json" ] && _json=1
+
+		load_config >/dev/null 2>&1 || true
+		ensure_state_dir
+
+		if [ "$_json" = "1" ]; then
+			status_json
+		else
+			status_text
+		fi
+		exit 0
+		;;
+
+	probe)
+		load_config >/dev/null 2>&1 || true
+		cmd_probe "$@"
+		exit $?
+		;;
+
+	takeover)
+		load_config >/dev/null 2>&1 || true
+		takeover
+		_rc=$?
+		say "$TAKEOVER_MSG"
+		exit "$_rc"
+		;;
+
+	switch)
+		load_config >/dev/null 2>&1 || true
+		cmd_switch "${1:-}"
+		exit $?
+		;;
+
+	rollback)
+		load_config >/dev/null 2>&1 || true
+		_ts=""
+		if [ "${1:-}" = "--from" ]; then
+			_ts=$2
+		fi
+		rollback "$_ts"
+		_rc=$?
+		say "$TAKEOVER_MSG"
+		exit "$_rc"
+		;;
+
+	apply)
+		cmd_apply
+		exit $?
+		;;
+
+	-h|--help|help)
+		usage
+		exit 0
+		;;
+
 	*)
-		echo "usage: $PROG [once|status|probe <addr> <domain> [cidr] [mode]]" >&2
+		usage
 		exit 1
 		;;
 esac
-
-load_config || {
-	log "disabled by uci (dnswatchd.main.enabled=0); exiting"
-	exit 0
-}
-
-mkdir -p "$STATE_DIR"
-
-log "started: interval=${INTERVAL}s timeout=${TIMEOUT}s fail=${FAIL_TH} recover=${RECOVER_TH} servers_file=${SERVERS_FILE}"
-
-trap 'log "received TERM, exiting"; exit 0' TERM INT
-
-while true; do
-	run_once
-	sleep "$INTERVAL" &
-	wait $!
-done

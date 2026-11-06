@@ -1,94 +1,21 @@
 #!/bin/sh
 #
-# dnswatchd 安装/升级时的一次性迁移脚本
+# dnswatchd - uci-defaults
 #
-# 做三件事：
-#   1. 把 dnsmasq 的 upstream 从 UCI 的 server 列表迁移到 --servers-file
-#      （必需的：--server 与 --servers-file 的条目会同时生效并发查询，
-#        而并发查询会让 fake-ip 与真实 IP 混用，破坏代理）
-#   2. 用现有的第一个 server 初始化 servers-file，保证迁移瞬间 DNS 不断
-#   3. 把第一个 server 填进 dnswatchd 的 primary upstream（若仍是占位值）
+# Deliberately does nothing to your DNS configuration.
 #
-# 幂等：靠 /etc/dnswatchd.migrated 标记，只跑一次。
+# 0.1.x deleted `dhcp.@dnsmasq[0].server` here and pointed dnsmasq at a
+# servers-file that only a daemon — disabled by default — would ever update.
+# Installing the package could break DNS on a router that had done nothing
+# wrong. That whole migration lives in `dnswatchd takeover` now, where it is
+# explicit, backed up, and reversible.
 #
 # SPDX-License-Identifier: MIT
 
+mkdir -p /etc/dnswatchd
+
 [ -f /etc/config/dnswatchd ] || exit 0
-[ -f /etc/dnswatchd.migrated ] && exit 0
-[ -f /etc/config/dhcp ] || exit 0
 
-SERVERS_FILE="$(uci -q get dnswatchd.main.servers_file)"
-[ -n "$SERVERS_FILE" ] || SERVERS_FILE="/tmp/dnsmasq.servers"
-
-BACKUP="/etc/dnswatchd.servers.bak"
-
-# ---------------------------------------------------------------- 1. 读现有 server
-EXISTING=""
-_old_server() {
-	EXISTING="${EXISTING:+$EXISTING }$1"
-}
-config_load dhcp
-config_list_foreach "@dnsmasq[0]" server _old_server 2>/dev/null
-
-# 兜底：如果 config_list_foreach 拿不到，用 uci get
-if [ -z "$EXISTING" ]; then
-	EXISTING="$(uci -q get dhcp.@dnsmasq[0].server | tr '\n' ' ')"
-fi
-
-# 取第一个（去掉可能的 #port 后缀，只留 IP 部分作为 address）
-FIRST_RAW="$(echo "$EXISTING" | awk '{print $1}')"
-FIRST_ADDR="${FIRST_RAW%%#*}"
-FIRST_PORT="53"
-case "$FIRST_RAW" in
-	*\#*) FIRST_PORT="${FIRST_RAW##*#}" ;;
-esac
-
-# 127.0.0.1 之类的本地回环上游，不迁移到 dnswatchd（那是另一个软件的事）
-case "$FIRST_ADDR" in
-	127.*|::1|'') FIRST_ADDR="" ;;
-esac
-
-# ---------------------------------------------------------------- 2. 备份
-if [ -n "$EXISTING" ]; then
-	echo "$EXISTING" > "$BACKUP"
-	logger -t dnswatchd "backed up previous dnsmasq server list to $BACKUP"
-fi
-
-# ---------------------------------------------------------------- 3. 初始化 servers-file
-if [ -n "$FIRST_ADDR" ]; then
-	{
-		echo '# managed by dnswatchd - do not edit'
-		echo "server=${FIRST_ADDR}"
-	} > "$SERVERS_FILE"
-	logger -t dnswatchd "initialized $SERVERS_FILE with server=${FIRST_ADDR}"
-else
-	# 没有可迁移的上游：留一个公共 DNS 兜底，避免清空后 DNS 全断
-	{
-		echo '# managed by dnswatchd - do not edit'
-		echo 'server=223.5.5.5'
-	} > "$SERVERS_FILE"
-	logger -t dnswatchd "no usable upstream found; initialized $SERVERS_FILE with 223.5.5.5"
-fi
-
-# ---------------------------------------------------------------- 4. 清空 UCI server
-# 逐个删除 list server
-while uci -q delete dhcp.@dnsmasq[0].server; do :; done
-
-# ---------------------------------------------------------------- 5. 打开 servers-file
-uci -q set dhcp.@dnsmasq[0].serversfile="$SERVERS_FILE"
-uci -q commit dhcp
-
-# ---------------------------------------------------------------- 6. 填 primary
-if [ -n "$FIRST_ADDR" ]; then
-	uci -q set dnswatchd.primary.address="$FIRST_ADDR"
-	[ "$FIRST_PORT" != "53" ] && uci -q set dnswatchd.primary.port="$FIRST_PORT"
-	uci -q commit dnswatchd
-fi
-
-# ---------------------------------------------------------------- 7. 重启 dnsmasq
-/etc/init.d/dnsmasq restart 2>/dev/null
-
-touch /etc/dnswatchd.migrated
-logger -t dnswatchd "migration complete (servers_file=$SERVERS_FILE)"
+logger -t dnswatchd "installed; DNS untouched. Run 'dnswatchd takeover' or open LuCI > Services > DNS Watchdog when ready." 2>/dev/null
 
 exit 0
