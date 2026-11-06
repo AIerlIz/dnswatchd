@@ -35,6 +35,7 @@ wget -O /etc/opkg/dnswatchd.conf \
 opkg update
 opkg install dnswatchd
 opkg install luci-app-dnswatchd      # Web 界面，可选
+opkg install luci-i18n-dnswatchd-zh-cn   # 中文界面，可选
 ```
 
 目前发布 `x86_64`、`aarch64_generic`、`aarch64_cortex-a53`、

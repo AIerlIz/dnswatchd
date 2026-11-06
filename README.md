@@ -39,7 +39,11 @@ wget -O /etc/opkg/dnswatchd.conf \
 opkg update
 opkg install dnswatchd
 opkg install luci-app-dnswatchd      # optional web UI
+opkg install luci-i18n-dnswatchd-zh-cn   # Chinese UI, if you want it
 ```
+
+The web UI is English by default; `luci-i18n-dnswatchd-zh-cn` adds Simplified
+Chinese.
 
 The feed currently publishes `x86_64`, `aarch64_generic`,
 `aarch64_cortex-a53`, `arm_cortex-a7_neon-vfpv4`, `mipsel_24kc` and

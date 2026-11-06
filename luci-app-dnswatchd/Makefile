@@ -17,6 +17,9 @@ PKG_LICENSE:=MIT
 PKG_MAINTAINER:=AIerlIz
 
 # Translations live in ./po/<lang>/dnswatchd.po and are picked up by luci.mk.
+#
+# luci.mk already calls BuildPackage for PKG_NAME and for every generated
+# luci-i18n-* package (luci.mk:353-355); calling it here as well re-registers
+# the app package ("ignoring old recipe for target ...luci-app-dnswatchd...ipk")
+# and the translation package never gets packaged.
 include $(TOPDIR)/feeds/luci/luci.mk
-
-$(eval $(call BuildPackage,$(PKG_NAME)))
