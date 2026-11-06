@@ -197,15 +197,31 @@ jobs:
             fi
 
             if [ -f control ]; then
-              cat control
-              # control 文件末尾通常没有换行，不补的话会和下面的 Filename: 粘成一行，
-              # opkg 就解析不到 Filename 字段（"does not have a valid filename field"）
+              # Filename / Size / SHA256sum 必须出现在 Description **之前**。
+              # opkg 的 control 解析器把 Description 之后的内容全部当作描述文本，
+              # 哪怕中间有空行也一样；放在后面就会报
+              # "does not have a valid filename field"。
+              # 用 awk 在 Description 行之前插入这三个字段。
+              awk -v f="$f" \
+                  -v s="$(stat -c%s "$BASE/$f")" \
+                  -v h="$(sha256sum "$BASE/$f" | awk '{print $1}')" '
+                /^Description:/ && !done {
+                  print "Filename: " f
+                  print "Size: " s
+                  print "SHA256sum: " h
+                  done = 1
+                }
+                { print }
+                END {
+                  # control 末尾若没有换行，补一个，避免下一条记录的 Package: 粘连
+                  if (!done) {
+                    print "Filename: " f
+                    print "Size: " s
+                    print "SHA256sum: " h
+                  }
+                }
+              ' control
               printf '\n'
-              # Filename 必须相对于 feed 的基准 URL（src/gz 里那个），
-              # 也就是只写文件名本身；写 aarch64_cortex-a53/xxx.ipk 会拼成双层目录
-              printf 'Filename: %s\n' "$f"
-              printf 'Size: %s\n' "$(stat -c%s "$BASE/$f")"
-              printf 'SHA256sum: %s\n\n' "$(sha256sum "$BASE/$f" | awk '{print $1}')"
             else
               echo "WARNING: no control file in $f" >&2
             fi
