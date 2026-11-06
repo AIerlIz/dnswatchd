@@ -166,22 +166,44 @@ jobs:
           set -e
           mkdir -p public/aarch64_cortex-a53
           cp ipk/*.ipk public/aarch64_cortex-a53/
-          cd public/aarch64_cortex-a53
+          BASE="$PWD/public/aarch64_cortex-a53"
+          cd "$BASE"
           : > Packages
           for f in *.ipk; do
-            rm -rf /tmp/ipkx && mkdir -p /tmp/ipkx && cd /tmp/ipkx
-            ar -x "$OLDPWD/$f" 2>/dev/null || true
-            tar -xzf control.tar.gz 2>/dev/null || tar -xzf control.tar.gz ./control 2>/dev/null || true
-            if [ -f ./control ]; then
-              cat ./control
-              printf 'Filename: aarch64_cortex-a53/%s\n' "$f"
-              printf 'Size: %s\n' "$(stat -c%s "$OLDPWD/$f")"
-              printf 'SHA256sum: %s\n\n' "$(sha256sum "$OLDPWD/$f" | awk '{print $1}')"
+            rm -rf /tmp/ipkx && mkdir -p /tmp/ipkx
+            cd /tmp/ipkx
+
+            # OpenWrt 的 .ipk 有两种封装：
+            #   老式 opkg —— ar 归档（debian-binary + control.tar.gz + data.tar.gz）
+            #   新式     —— 整个 ipk 就是一个 tar.gz，内含上述三者
+            # 先探 ar，失败再按 tar.gz 解，两种都覆盖。
+            if ar -t "$BASE/$f" >/dev/null 2>&1; then
+              ar -x "$BASE/$f" 2>/dev/null || true
+            else
+              tar -xzf "$BASE/$f" 2>/dev/null || true
             fi
-            cd "$OLDPWD"
+
+            if [ -f control.tar.gz ]; then
+              tar -xzf control.tar.gz 2>/dev/null || true
+            fi
+
+            if [ -f control ]; then
+              cat control
+              printf 'Filename: aarch64_cortex-a53/%s\n' "$f"
+              printf 'Size: %s\n' "$(stat -c%s "$BASE/$f")"
+              printf 'SHA256sum: %s\n\n' "$(sha256sum "$BASE/$f" | awk '{print $1}')"
+            else
+              echo "WARNING: no control file in $f" >&2
+            fi
+
+            cd "$BASE"
           done >> Packages
+
+          echo "=== Packages 条目数 ==="
+          grep -c '^Package:' Packages || true
           gzip -kf Packages
           ls -la
+          test "$(grep -c '^Package:' Packages)" -ge 2
 
       - name: Write opkg feed config
         run: |
