@@ -1,19 +1,19 @@
-name: Build OpenWrt packages
+name: build
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
+    branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
-    branches: [main]
+    branches: [ main ]
   workflow_dispatch:
 
 env:
-  # 两个包都是 PKGARCH:=all（纯脚本，无架构依赖），用任意 target 的 SDK 都能编，
-  # 编出来的 ipk 在 aarch64 / x86 / mips 上通用。
-  SDK_VERSION: 24.10-SNAPSHOT
-  SDK_TARGET: x86/64
-  SDK_ARCH: x86-64
+  # Packages are built against one release and must install on all three
+  # supported lines. That works because the probe is statically linked and the
+  # rest is shell: nothing binds to this SDK's libc.
+  SDK_VERSION: '24.10.8'
+
 
 jobs:
   lint:
@@ -22,24 +22,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Shell syntax check
+      - name: Shell syntax
         run: |
           set -e
           for f in dnswatchd/files/dnswatchd \
+                   dnswatchd/files/lib/*.sh \
                    dnswatchd/files/dnswatchd.init \
-                   dnswatchd/files/dnswatchd.uci-defaults; do
-            echo "== $f"
-            sh -n "$f"
+                   dnswatchd/files/dnswatchd.uci-defaults \
+                   dnswatchd/files/rpcd/dnswatchd \
+                   scripts/*.sh \
+                   tests/probe/run.sh tests/probe/fixture_dns.py \
+                   tests/core/run.sh tests/core/takeover.sh \
+                   tests/core/shim/functions.sh; do
+            case "$f" in
+              *.py) python3 -m py_compile "$f" ;;
+              *)    sh -n "$f" ;;
+            esac
+            echo "ok $f"
           done
-          echo "all scripts OK"
 
-      - name: JSON / YAML sanity
+      - name: JSON and JS
         run: |
           set -e
-          python3 -m json.tool luci-app-dnswatchd/root/usr/share/luci/menu.d/luci-app-dnswatchd.json > /dev/null
-          python3 -m json.tool luci-app-dnswatchd/root/usr/share/rpcd/acl.d/luci-app-dnswatchd.json > /dev/null
+          python3 -m json.tool luci-app-dnswatchd/root/usr/share/luci/menu.d/luci-app-dnswatchd.json >/dev/null
+          python3 -m json.tool luci-app-dnswatchd/root/usr/share/rpcd/acl.d/luci-app-dnswatchd.json >/dev/null
           python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/build.yml'))"
-          echo "json/yaml OK"
+          node --check luci-app-dnswatchd/htdocs/luci-static/resources/view/dnswatchd/main.js
+          echo "json/yaml/js OK"
+
+      - name: Translation coverage
+        run: |
+          set -e
+          # Every msgid the view uses must have a zh_Hans string, and the counts
+          # must match, or the .lmo build silently ships a half-translated UI.
+          node - <<'EOF'
+          const fs = require('fs');
+          const src = fs.readFileSync('luci-app-dnswatchd/htdocs/luci-static/resources/view/dnswatchd/main.js', 'utf8');
+          const ids = [...new Set([...src.matchAll(/_\((['"])((?:\\.|(?!\1).)*)\1\)/g)].map(m => m[2]))];
+          const po = fs.readFileSync('luci-app-dnswatchd/po/zh_Hans/dnswatchd.po', 'utf8');
+          const entries = [...po.matchAll(/^msgid "(.*)"\nmsgstr "(.*)"$/gm)];
+          const empty = entries.filter(e => e[2] === '').map(e => e[1]);
+          console.log(`msgids in view: ${ids.length}, translated entries: ${entries.length}`);
+          if (empty.length) { console.error('untranslated:', empty); process.exit(1); }
+          if (entries.length < ids.length) { console.error('po is missing strings'); process.exit(1); }
+          EOF
 
       - name: ShellCheck
         uses: ludeeus/action-shellcheck@2.0.0
@@ -48,118 +74,156 @@ jobs:
           severity: warning
         continue-on-error: true
 
-  build:
-    name: Build ipk
+  test:
+    name: Test
     runs-on: ubuntu-latest
-    needs: lint
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache SDK tarball
-        id: sdk-cache
-        uses: actions/cache@v4
-        with:
-          # 只缓存原始 tar 包，不缓存解压后的 SDK。
-          # 缓存解压目录会把上次的 feeds.conf.default 修改（我们追加的 src-link）
-          # 和 feeds/ 的 git 状态一起带回来，导致下次 feeds update 报 exit 25。
-          path: sdk.tar.zst
-          key: sdk-tar-${{ env.SDK_VERSION }}-${{ env.SDK_ARCH }}-v1
+      - name: Build probe (host)
+        run: gcc -O2 -Wall -Wextra -o /tmp/dnswatch-probe dnswatchd/files/dnswatch-probe.c
 
-      - name: Download SDK
-        if: steps.sdk-cache.outputs.cache-hit != 'true'
+      - name: Probe behaviour
+        run: sh tests/probe/run.sh /tmp/dnswatch-probe
+
+      - name: Core rounds
+        run: sh tests/core/run.sh
+
+      - name: Takeover and rollback
+        run: sh tests/core/takeover.sh
+
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    needs: [ lint, test ]
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - 'x86/64'
+          - 'armsr/armv8'
+          - 'mediatek/filogic'
+          - 'ramips/mt7621'
+          - 'ath79/generic'
+          - 'ipq40xx/generic'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve SDK filename
+        id: sdk
         run: |
           set -e
-          URL="https://downloads.openwrt.org/releases/${SDK_VERSION}/targets/${SDK_TARGET}/openwrt-sdk-${SDK_VERSION}-${SDK_ARCH}_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
-          echo "downloading $URL"
-          curl -fsSL -o sdk.tar.zst "$URL"
+          BASE="https://downloads.openwrt.org/releases/${SDK_VERSION}/targets/${{ matrix.target }}/"
+          # The gcc version is part of the filename and changes between releases;
+          # hard-coding it is how the 0.1.x CI would have silently died.
+          FILE=$(curl -fsSL "$BASE" | grep -oE 'openwrt-sdk-[^"<]*Linux-x86_64\.tar\.zst' | head -1)
+          test -n "$FILE" || { echo "no SDK found under $BASE" >&2; exit 1; }
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+          echo "using $FILE"
+
+      - name: Cache SDK
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: sdk.tar.zst
+          key: sdk-${{ env.SDK_VERSION }}-${{ hashFiles('.github/workflows/build.yml') }}-${{ steps.sdk.outputs.file }}
+
+      - name: Download SDK
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          curl -fsSL -o sdk.tar.zst \
+            "https://downloads.openwrt.org/releases/${SDK_VERSION}/targets/${{ matrix.target }}/${{ steps.sdk.outputs.file }}"
           ls -lh sdk.tar.zst
 
       - name: Extract SDK
         run: |
           set -e
           rm -rf sdk && mkdir -p sdk
-          # 不用 tar --use-compress-program：ubuntu-latest 的 tar 对 .zst 支持不稳
           zstd -d -c sdk.tar.zst | tar -x -C sdk --strip-components=1
-          ls sdk | head
+          test -f sdk/rules.mk
 
-      - name: Verify SDK
-        run: |
-          set -e
-          test -f sdk/rules.mk && echo "rules.mk OK"
-          test -d sdk/scripts && echo "scripts/ OK"
-          test -f sdk/feeds.conf.default && echo "feeds.conf.default OK"
-
-      - name: Add our feed
+      - name: Add local feed
         run: |
           set -e
           cd sdk
-          # 幂等：先删掉同名行再加，避免重复
           sed -i '\|^src-link dnswatchd |d' feeds.conf.default
           echo "src-link dnswatchd $GITHUB_WORKSPACE" >> feeds.conf.default
-          cat feeds.conf.default
-
-      - name: Update and install feeds
-        working-directory: sdk
-        run: |
-          set -e
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: Configure
         working-directory: sdk
-        run: |
-          set -e
-          make defconfig
-          grep -E 'CONFIG_PACKAGE_(dnswatchd|luci-app-dnswatchd)' .config || true
+        run: make defconfig
 
-      - name: Build packages
+      - name: Compile
         working-directory: sdk
         run: |
           set -e
           make package/dnswatchd/compile V=s -j"$(nproc)"
           make package/luci-app-dnswatchd/compile V=s -j"$(nproc)"
 
-      - name: Show results
-        working-directory: sdk
-        run: |
-          echo "=== bin/packages tree ==="
-          find bin/packages -type f -name '*.ipk' -o -type d -name 'dnswatchd*' 2>/dev/null | head -30
-          echo "=== all ipk ==="
-          find bin -name '*.ipk' 2>/dev/null | head -30
-          ls -laR bin/packages 2>/dev/null | head -60
-
-      - name: Collect artifacts
+      - name: Collect
+        id: collect
         run: |
           set -e
           mkdir -p out
-          # SDK 的 bin/ 里躺着几千个预编译包（231 MB），只拿我们自己编出来的这两个。
-          find sdk/bin -type f \
-               \( -name 'dnswatchd_*.ipk' -o -name 'luci-app-dnswatchd_*.ipk' \) \
-               -exec cp -v {} out/ \;
-          echo "=== out/ ==="
-          ls -la out/
-          count=$(ls out/*.ipk 2>/dev/null | wc -l)
-          echo "collected $count ipk (expected exactly 2)"
-          test "$count" -eq 2
+          for ipk in $(find sdk/bin -name 'dnswatchd_*.ipk' -o -name 'luci-app-dnswatchd_*.ipk'); do
+            arch=$(basename "$ipk" .ipk | awk -F_ '{print $NF}')
+            mkdir -p "out/$arch"
+            cp -v "$ipk" "out/$arch/"
+          done
+          test -n "$(find out -name '*.ipk')" || { echo "no package produced" >&2; exit 1; }
+
+          fail=0
+          set +e
+          for ipk in $(find out -name '*.ipk' | sort); do
+            sh scripts/smoke-ipk.sh "$ipk" "$(basename "$ipk" | cut -d_ -f1)" || fail=1
+          done
+          set -e
+          test "$fail" -eq 0
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ipk
-          path: out/*.ipk
+          name: ipk-${{ strategy.job-index }}
+          path: out/*/*.ipk
           if-no-files-found: error
 
-      - name: Upload to release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: [ build, test, lint ]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches PKG_VERSION
+        run: |
+          set -e
+          VERSION=$(sed -n 's/^PKG_VERSION:=//p' dnswatchd/Makefile)
+          test "v${VERSION}" = "${GITHUB_REF_NAME}" || {
+            echo "tag ${GITHUB_REF_NAME} does not match PKG_VERSION ${VERSION}" >&2
+            exit 1
+          }
+
+      - uses: actions/download-artifact@v4
         with:
-          files: out/*.ipk
+          pattern: ipk-*
+          path: ipk
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ipk/*.ipk
           generate_release_notes: true
 
   feed:
     name: Publish opkg feed
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    needs: build
+    needs: [ release ]
     permissions:
       contents: write
     steps:
@@ -167,83 +231,63 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: ipk
+          pattern: ipk-*
           path: ipk
+          merge-multiple: true
 
-      - name: Build feed index
+      - name: Rebuild the feed tree
         run: |
           set -e
-          mkdir -p public/aarch64_cortex-a53
-          cp ipk/*.ipk public/aarch64_cortex-a53/
-          BASE="$PWD/public/aarch64_cortex-a53"
-          cd "$BASE"
-          : > Packages
-          for f in *.ipk; do
-            rm -rf /tmp/ipkx && mkdir -p /tmp/ipkx
-            cd /tmp/ipkx
 
-            # OpenWrt 的 .ipk 有两种封装：
-            #   老式 opkg —— ar 归档（debian-binary + control.tar.gz + data.tar.gz）
-            #   新式     —— 整个 ipk 就是一个 tar.gz，内含上述三者
-            # 先探 ar，失败再按 tar.gz 解，两种都覆盖。
-            if ar -t "$BASE/$f" >/dev/null 2>&1; then
-              ar -x "$BASE/$f" 2>/dev/null || true
-            else
-              tar -xzf "$BASE/$f" 2>/dev/null || true
-            fi
+          # Old versions stay published: opkg picks the newest one, and the rest
+          # remain downloadable for anyone pinning a version. gh-pages is the
+          # accumulator, so start from whatever is already deployed.
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git clone --depth 1 --branch gh-pages \
+              "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" pages
+            rm -rf pages/.git
+          else
+            mkdir -p pages
+          fi
 
-            if [ -f control.tar.gz ]; then
-              tar -xzf control.tar.gz 2>/dev/null || true
-            fi
+          # Architecture-specific packages go to their own directory.
+          for f in ipk/*.ipk; do
+            arch=$(basename "$f" .ipk | awk -F_ '{print $NF}')
+            if [ "$arch" = "all" ]; then continue; fi
+            mkdir -p "pages/$arch"
+            cp "$f" "pages/$arch/"
+          done
 
-            if [ -f control ]; then
-              # Filename / Size / SHA256sum 必须出现在 Description **之前**。
-              # opkg 的 control 解析器把 Description 之后的内容全部当作描述文本，
-              # 哪怕中间有空行也一样；放在后面就会报
-              # "does not have a valid filename field"。
-              # 用 awk 在 Description 行之前插入这三个字段。
-              awk -v f="$f" \
-                  -v s="$(stat -c%s "$BASE/$f")" \
-                  -v h="$(sha256sum "$BASE/$f" | awk '{print $1}')" '
-                /^Description:/ && !done {
-                  print "Filename: " f
-                  print "Size: " s
-                  print "SHA256sum: " h
-                  done = 1
-                }
-                { print }
-                END {
-                  # control 末尾若没有换行，补一个，避免下一条记录的 Package: 粘连
-                  if (!done) {
-                    print "Filename: " f
-                    print "Size: " s
-                    print "SHA256sum: " h
-                  }
-                }
-              ' control
-              printf '\n'
-            else
-              echo "WARNING: no control file in $f" >&2
-            fi
+          # Architecture-independent ones are duplicated into every directory,
+          # including the ones that already existed. Otherwise
+          # `opkg install luci-app-dnswatchd` fails on every target that was
+          # published before this run.
+          DIRS=$(find pages -mindepth 1 -maxdepth 1 -type d | sort)
+          for dir in $DIRS; do
+            for f in ipk/*.ipk; do
+              arch=$(basename "$f" .ipk | awk -F_ '{print $NF}')
+              if [ "$arch" = "all" ]; then cp "$f" "$dir/"; fi
+            done
+          done
 
-            cd "$BASE"
-          done >> Packages
+          for dir in $DIRS; do
+            sh scripts/mkindex.sh "$dir"
+          done
 
-          echo "=== Packages 条目数 ==="
-          grep -c '^Package:' Packages || true
-          gzip -kf Packages
-          ls -la
-          test "$(grep -c '^Package:' Packages)" -ge 2
+          OWNER="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+          {
+            echo "# dnswatchd opkg feed."
+            echo "# Replace <arch> with your router's architecture:"
+            echo "#   opkg print-architecture"
+            echo "src/gz dnswatchd https://${OWNER}.github.io/${REPO}/<arch>"
+          } > pages/dnswatchd.conf
 
-      - name: Write opkg feed config
-        run: |
-          cat > public/dnswatchd.conf <<EOF
-          src/gz dnswatchd https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/aarch64_cortex-a53
-          EOF
-          cat public/dnswatchd.conf
+          find pages -name '*.ipk' | sort
 
-      - name: Deploy to gh-pages
+      - name: Deploy
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./public
+          publish_dir: ./pages
+          keep_files: false

@@ -1,212 +1,191 @@
 # dnswatchd
 
-OpenWrt 包。探测 dnsmasq 的上游，校验应答落在哪个网段，不对就切换。
+An OpenWrt DNS upstream watchdog.
 
-## 约束
+It probes the upstream resolvers dnsmasq uses and checks that the answers land
+where they should — inside a Clash fake-ip pool for a proxy upstream, outside it
+for a direct one. When the preferred upstream stops answering correctly it
+rewrites dnsmasq's `servers-file` to the next candidate and reloads it. When the
+preferred one recovers, it goes back.
 
-dnsmasq 的 `--server` 和 `--servers-file` 里的条目会合并生效。所以：
+Installing the package **changes nothing about your DNS**. Handing dnsmasq over
+is a separate, explicit, reversible step.
 
-- `--servers-file` 里只写一行 `server=`
-- UCI 里的 `server` 列表必须为空
+## Why it exists
 
-同时存在两条就会并发查询。
+A fake-ip proxy and a plain ISP resolver in the same dnsmasq means you no longer
+control which one answers. One slow moment from the proxy and a real address
+leaks into a domain that was supposed to stay fake — and everything built on
+those addresses (routing rules, firewall marks) quietly stops matching.
 
-## 安装
+dnsmasq has no notion of "this upstream is lying to me". dnswatchd adds one, and
+keeps exactly one server in the pool so the choice is never ambiguous.
+
+## Requirements
+
+- OpenWrt 23.05, 24.10 or 25.12
+- `dnsmasq` or `dnsmasq-full`
+- An architecture the feed publishes (see below), or build it yourself
+
+## Install
 
 ```sh
-wget -O /etc/opkg/dnswatchd.conf https://AIerlIz.github.io/dnswatchd/dnswatchd.conf
+# pick your architecture
+opkg print-architecture
+
+cat > /etc/opkg/dnswatchd.conf <<'EOF'
+src/gz dnswatchd https://AIerlIz.github.io/dnswatchd/aarch64_cortex-a53
+EOF
+
 opkg update
 opkg install dnswatchd
-opkg install luci-app-dnswatchd   # Web 界面，可选
+opkg install luci-app-dnswatchd      # optional web UI
 ```
 
-源码编译：
+The feed currently publishes `x86_64`, `aarch64_generic`,
+`aarch64_cortex-a53`, `arm_cortex-a7_neon-vfpv4`, `mipsel_24kc` and
+`mips_24kc`. Anything else: see [Building from source](#building-from-source).
+
+## First run
+
+Nothing happens on install. dnsmasq keeps doing exactly what it did before.
+
+**Web UI** — *Services → DNS Watchdog*. The Status panel shows what dnsmasq
+currently uses; **Take over DNS** performs the migration. Read the dialog: it
+lists exactly what is about to change. **Give DNS back** undoes it.
+
+**Command line**, same thing:
+
+```sh
+dnswatchd takeover     # back up, point dnsmasq at us, disable resolv.conf
+dnswatchd status       # what is going on
+dnswatchd rollback     # put it all back
+```
+
+`takeover` will refuse if `dhcp.@dnsmasq[0].serversfile` already points at
+something that is not ours — it does not overwrite another tool's setup.
+
+### What takeover actually changes
+
+1. Copies the dnsmasq UCI config and the exact values it is about to touch into
+   `/etc/dnswatchd/backup/<timestamp>/`.
+2. Writes the servers-file with the first upstream dnsmasq already had.
+3. Clears `dhcp.@dnsmasq[0].server`.
+4. Sets `dhcp.@dnsmasq[0].serversfile` to `/etc/dnswatchd/servers`.
+5. Sets `dhcp.@dnsmasq[0].noresolv=1`.
+6. Adds an `isp` upstream (`source=resolv`) so the ISP resolvers remain
+   available as a real, lowest-priority candidate.
+7. Reloads dnsmasq and enables the service.
+
+Step 5 is the whole point and the easiest to get wrong: with `noresolv=0`,
+dnsmasq keeps `/tmp/resolv.conf.d/resolv.conf.auto` in its pool, so the ISP
+resolver is always a second upstream whether you configured it or not.
+
+## Configuration
+
+`/etc/config/dnswatchd`. Everything below is also in the web UI.
+
+```uci
+config dnswatchd 'main'
+	option enabled '0'              # master switch; takeover turns it on
+	option interval '30'            # seconds between rounds, minimum 5
+	option probe_deadline '2000'    # milliseconds per DNS query, hard limit
+	option fail_threshold '2'       # consecutive failures before DOWN
+	option recover_threshold '2'    # consecutive successes before UP again
+	option servers_file '/etc/dnswatchd/servers'
+	option selection 'priority'     # priority | latency
+	option latency_margin '20'      # percent; latency selection only
+	option latency_switch_after '2' # rounds in a row; latency selection only
+	option round_budget '80'        # percent of interval a round may spend
+	option dry_run '0'              # log decisions, never write the file
+	option syslog '1'
+	option verbose '0'
+```
+
+Each upstream:
+
+```uci
+config upstream 'primary'
+	option enabled '1'
+	option source 'static'          # static | resolv
+	option address '192.168.10.2'
+	option port '53'
+	option probe_domain 'www.google.com'
+	option expect_cidr '198.18.0.0/16'
+	option expect_mode 'in'         # in | not-in | any
+	option priority '10'
+```
+
+`source='resolv'` ignores `address` and expands the IPv4 nameservers in
+`/tmp/resolv.conf.d/resolv.conf.auto` instead — up to two entries, numbered
+`<section>_1`, `<section>_2`.
+
+### How a round works
+
+Every enabled upstream is probed every round (no early exit — that is what makes
+the status page honest). Then:
+
+- `selection='priority'` — the lowest `priority` that is up wins.
+- `selection='latency'` — the smallest measured DNS round-trip wins, but only if
+  it is at least `latency_margin` percent faster than the incumbent, for
+  `latency_switch_after` rounds in a row.
+
+A round that runs past `round_budget` percent of `interval` stops probing and
+decides with what it has.
+
+## Commands
+
+```
+dnswatchd                       run the watch loop (procd starts this)
+dnswatchd once [--json]         run a single round
+dnswatchd status [--json]       show what is going on
+dnswatchd probe <addr> <domain> [cidr] [mode] [port]
+dnswatchd switch <section>      force one upstream, bypassing the selection
+dnswatchd takeover              take dnsmasq over
+dnswatchd rollback              give it back
+dnswatchd apply                 commit staged UCI and restart (used by LuCI)
+```
+
+`status --json` is the machine-readable form: what is active, every upstream's
+counters and last measured round-trip, and what dnsmasq itself is configured
+with.
+
+## Limitations
+
+- IPv4 only. `AAAA` records are not consulted and not validated.
+- dnsmasq only. smartdns, mosdns and friends manage their own upstreams.
+- One upstream at a time, by design. If you want several answering, this is the
+  wrong tool.
+- The probe is a compiled, statically linked binary, so the package is
+  architecture specific.
+
+## Building from source
 
 ```sh
 echo "src-git dnswatchd https://github.com/AIerlIz/dnswatchd.git" >> feeds.conf.default
 ./scripts/feeds update dnswatchd
 ./scripts/feeds install -a -p dnswatchd
 make package/dnswatchd/compile V=s
+make package/luci-app-dnswatchd/compile V=s
 ```
 
-`PKGARCH:=all`。
+## Tests
 
-### 安装脚本
-
-`/etc/uci-defaults/90-dnswatchd` 装完跑一次，靠 `/etc/dnswatchd.migrated` 标记保证幂等：
-
-1. 把 `dhcp.@dnsmasq[0].server` 写到 `/etc/dnswatchd.servers.bak`
-2. 用第一条初始化 `servers_file`，写一行 `server=<地址>`
-3. 逐条删除 UCI 的 `server`
-4. `dhcp.@dnsmasq[0].serversfile` 设为同一路径
-5. 把该地址填进 `dnswatchd.primary.address`（原地址带 `#端口` 则同时填 `port`）
-6. 重启 dnsmasq
-7. 写标记文件
-
-首条地址是 `127.*` 或 `::1` 时跳过迁移，`servers_file` 填 `223.5.5.5`。
-
-`enabled` 默认 `0`。
-
-## 配置
-
-`/etc/config/dnswatchd`：
-
-```uci
-config dnswatchd 'main'
-	option enabled '0'                 # 总开关
-	option interval '30'               # 探测间隔（秒），最小 5
-	option timeout '1'                 # 单次 nslookup 超时（秒）
-	option fail_threshold '2'          # 连续失败几次算 DOWN
-	option recover_threshold '2'       # 连续成功几次算 UP
-	option servers_file '/tmp/dnsmasq.servers'
-
-	option selection 'priority'        # priority | latency
-
-	# 以下三项仅 selection='latency'
-	option latency_samples '3'         # ping 采样次数，1-10
-	option latency_margin '20'         # 比当前快多少百分点才考虑切换，0-90
-	option latency_switch_after '2'    # 连续赢几轮才切
-
-	option dry_run '0'                 # 只写日志，不改 servers-file
-	option syslog '1'
-	option verbose '0'                 # 1 时「稳定在某上游」也记日志
-
-config upstream 'primary'
-	option enabled '1'
-	option type 'proxy'                # proxy | direct，只作标记
-	option address '192.168.10.2'
-	option port '53'
-	option probe_domain 'www.google.com'
-	option expect_cidr '198.18.0.0/16'
-	option expect_mode 'in'            # in | not-in
-	option priority '10'
-
-config upstream 'fallback'
-	option enabled '1'
-	option type 'direct'
-	option address '223.5.5.5'
-	option port '53'
-	option probe_domain 'www.baidu.com'
-	option expect_cidr '198.18.0.0/16'
-	option expect_mode 'not-in'
-	option priority '20'
-```
-
-`upstream` 段数量不限。
-
-`expect_cidr` 留空时只要求能解析出 A 记录，不校验内容。
-
-`probe_domain` 默认 `www.baidu.com`，`expect_mode` 默认 `in`，`priority` 默认 `10`，`port` 默认 `53`。
-
-### LuCI
-
-菜单在 `服务 → DNS Watchdog`（`/admin/services/dnswatchd`）。
-
-「常规设置」里有 13 个公共 DNS 的预设，选中后点「添加到上游列表」会新建一条
-`upstream`，`priority` 取当前最大值 +10。地址已存在时不添加。下面的表格可以手填任意条目。
-
-## 探测
-
-每次探测：
-
-```
-nslookup -type=A -timeout=<timeout> -retry=1 <probe_domain> <address>[#port]
-```
-
-取输出中最后一个 `Address:` 行的 IPv4，与 `expect_cidr` 比对：
-
-- `expect_mode='in'`：必须落在 `expect_cidr` 内
-- `expect_mode='not-in'`：必须落在 `expect_cidr` 外
-- `expect_cidr` 为空：解析出 IPv4 即通过
-
-每个上游的状态存在 `/var/run/dnswatchd/<section>.state`，内容为 `ST_FAILS`、`ST_OKS`、
-`ST_STATUS` 三项：
-
-```
-探测成功 → oks++,  fails=0；oks  >= recover_threshold → up
-探测失败 → fails++, oks=0；fails >= fail_threshold   → down
-```
-
-当前激活的上游存在 `/var/run/dnswatchd/active`。
-
-## 选法
-
-`priority`：按 `priority` 升序逐个探测，第一个 `up` 的胜出。全都不 `up` 时不改 servers-file。
-
-`latency`：探测全部上游，保留 `up` 的，逐个 `ping -c <latency_samples> -W 2 -q` 取 avg RTT，
-按 `(RTT, priority)` 升序取第一个。
-
-切换到新候选需要同时满足：
-
-- 新候选 RTT < 当前 RTT × (100 - `latency_margin`) / 100
-- 连续赢 `latency_switch_after` 轮
-
-当前上游不在 `up` 列表里时两条都跳过。
-
-`ping` 失败（ICMP 不通）的上游 RTT 记为 `99999`，排最后但不排除。
-
-## 应用切换
+No OpenWrt needed:
 
 ```sh
-printf '# managed by dnswatchd - do not edit\nserver=%s\n' <address> > /tmp/dnsmasq.servers.tmp.$$
-mv /tmp/dnsmasq.servers.tmp.$$ /tmp/dnsmasq.servers
-kill -HUP $(pidof dnsmasq)
+gcc -O2 -o /tmp/dnswatch-probe dnswatchd/files/dnswatch-probe.c
+sh tests/probe/run.sh /tmp/dnswatch-probe
+sh tests/core/run.sh
+sh tests/core/takeover.sh
 ```
 
-`dry_run='1'` 时只写日志，不落盘不 HUP。
+## More
 
-## 命令
+- [docs/DESIGN.md](docs/DESIGN.md) — the invariants and why they exist
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — when it misbehaves
+- [README.zh.md](README.zh.md) — 中文说明
 
-```sh
-/usr/sbin/dnswatchd once
-/usr/sbin/dnswatchd status
-/usr/sbin/dnswatchd probe <address> <domain> [cidr] [mode]
-```
-
-`once` 跑一轮。`status` 输出：
-
-```
-active: primary
-servers-file: /tmp/dnsmasq.servers
-  # managed by dnswatchd - do not edit
-  server=192.168.10.2
---- primary ---
-  fails:  0
-  oks:    7
-  status: up
-```
-
-`probe` 输出 `OK` 或 `FAIL`，退出码对应 0/1。
-
-`status` 和 `probe` 会先加载配置；配置加载失败时用内置默认值继续。
-
-## 主循环
-
-```sh
-load_config || exit 0
-mkdir -p /var/run/dnswatchd
-trap 'exit 0' TERM INT
-
-while true; do
-	run_once
-	sleep "$interval" &
-	wait $!
-done
-```
-
-procd 拉起，`respawn 3600 5 5`，`START=95`。
-
-收到 `reload` 时 `stop` + `start`。
-
-## 代码里的边界处理
-
-- `interval` 小于 5 时钳到 5；非数字回落到 30
-- `timeout`、`fail_threshold`、`recover_threshold`、`latency_switch_after` 小于 1 时钳到 1
-- `latency_samples` 限制在 1-10，`latency_margin` 上限 90
-- `selection` 不是 `priority`/`latency` 时回落到 `priority` 并记一条日志
-- `apply_upstream` 写临时文件后 `mv`，失败时删临时文件并返回 1
-- `dnsmasq` 未运行时写文件但不发 HUP，记一条 WARN
-
-## 许可
+## License
 
 MIT

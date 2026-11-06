@@ -26,3 +26,5 @@ __pycache__/
 # 本地测试残留
 *.qcow2
 *.img
+dnswatch-probe
+
