@@ -155,7 +155,8 @@ jobs:
           set -e
           mkdir -p out
           for ipk in $(find sdk/bin -name 'dnswatchd_*.ipk' -o -name 'luci-app-dnswatchd_*.ipk'); do
-            arch=$(basename "$ipk" .ipk | awk -F_ '{print $NF}')
+            arch=$(sh scripts/ipk-field.sh "$ipk" Architecture)
+            test -n "$arch" || { echo "no Architecture in $ipk" >&2; exit 1; }
             mkdir -p "out/$arch"
             cp -v "$ipk" "out/$arch/"
           done
@@ -164,7 +165,8 @@ jobs:
           fail=0
           set +e
           for ipk in $(find out -name '*.ipk' | sort); do
-            sh scripts/smoke-ipk.sh "$ipk" "$(basename "$ipk" | cut -d_ -f1)" || fail=1
+            pkg=$(sh scripts/ipk-field.sh "$ipk" Package)
+            sh scripts/smoke-ipk.sh "$ipk" "$pkg" || fail=1
           done
           set -e
           test "$fail" -eq 0
@@ -238,7 +240,7 @@ jobs:
 
           # Architecture-specific packages go to their own directory.
           for f in ipk/*.ipk; do
-            arch=$(basename "$f" .ipk | awk -F_ '{print $NF}')
+            arch=$(sh scripts/ipk-field.sh "$f" Architecture)
             if [ "$arch" = "all" ]; then continue; fi
             mkdir -p "pages/$arch"
             cp "$f" "pages/$arch/"
@@ -251,7 +253,7 @@ jobs:
           DIRS=$(find pages -mindepth 1 -maxdepth 1 -type d | sort)
           for dir in $DIRS; do
             for f in ipk/*.ipk; do
-              arch=$(basename "$f" .ipk | awk -F_ '{print $NF}')
+              arch=$(sh scripts/ipk-field.sh "$f" Architecture)
               if [ "$arch" = "all" ]; then cp "$f" "$dir/"; fi
             done
           done

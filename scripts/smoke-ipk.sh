@@ -106,7 +106,7 @@ etc/uci-defaults/90-dnswatchd"
 	SCRIPTS="$SCRIPTS $ROOT/usr/lib/dnswatchd/takeover.sh"
 	SCRIPTS="$SCRIPTS $ROOT/etc/init.d/dnswatchd $ROOT/etc/uci-defaults/90-dnswatchd"
 else
-	FILES="htdocs/luci-static/resources/view/dnswatchd/main.js
+	FILES="www/luci-static/resources/view/dnswatchd/main.js
 usr/share/luci/menu.d/luci-app-dnswatchd.json
 usr/share/rpcd/acl.d/luci-app-dnswatchd.json"
 	EXECUTABLES=""
