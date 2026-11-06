@@ -18,6 +18,12 @@
 set -u
 
 DIR=${1:-.}
+# Resolve before cd: everything below refers to files by bare name, and a
+# relative "$DIR" would otherwise be re-joined onto itself.
+case "$DIR" in
+	/*) ;;
+	*) DIR="$PWD/$DIR" ;;
+esac
 cd "$DIR" || exit 1
 
 : > Packages
@@ -33,6 +39,7 @@ for f in *.ipk; do
 	else
 		( cd "$work" && tar -xzf "$DIR/$f" ) >/dev/null 2>&1
 	fi
+	# $DIR is absolute by now, so this is safe either way.
 
 	for member in control.tar.gz control.tar.xz control.tar.zst; do
 		[ -f "$work/$member" ] || continue
@@ -79,4 +86,12 @@ done
 gzip -kf Packages
 
 echo "indexed $count package(s) in $DIR"
-grep -c '^Package:' Packages || true
+
+# An empty index used to be published with a zero exit status, which made a
+# broken feed indistinguishable from a working one.
+if [ "$count" -eq 0 ]; then
+	echo "mkindex: no packages found in $DIR" >&2
+	exit 1
+fi
+
+grep -c '^Package:' Packages
