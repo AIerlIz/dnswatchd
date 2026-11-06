@@ -214,7 +214,11 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: ipk/*.ipk
+          # download-artifact preserves each artifact's own directory layout, so
+          # the packages are at ipk/<arch>/<file>.ipk. A flat ipk/*.ipk glob
+          # matches nothing and the release is published empty without an error.
+          files: ipk/**/*.ipk
+          fail_on_unmatched_files: true
           generate_release_notes: true
 
   feed:
@@ -249,7 +253,7 @@ jobs:
           fi
 
           # Architecture-specific packages go to their own directory.
-          for f in ipk/*.ipk; do
+          for f in $(find ipk -name '*.ipk' | sort); do
             arch=$(sh scripts/ipk-field.sh "$f" Architecture)
             if [ "$arch" = "all" ]; then continue; fi
             mkdir -p "pages/$arch"
@@ -262,7 +266,7 @@ jobs:
           # published before this run.
           DIRS=$(find pages -mindepth 1 -maxdepth 1 -type d | sort)
           for dir in $DIRS; do
-            for f in ipk/*.ipk; do
+            for f in $(find ipk -name '*.ipk' | sort); do
               arch=$(sh scripts/ipk-field.sh "$f" Architecture)
               if [ "$arch" = "all" ]; then cp "$f" "$dir/"; fi
             done
