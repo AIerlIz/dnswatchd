@@ -1,0 +1,128 @@
+name: Build OpenWrt packages
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  FEED_NAME: dnswatchd
+  # 两个包都是 PKGARCH:=all（纯脚本，无架构依赖），编一次即通吃所有架构。
+  # 用 24.10 的 SDK 是因为它稳定且自带 luci feed；编出的 all 包在 25.12 上同样可用。
+  # 如果你的目标固件是 25.12 且 24.10 SDK 编出来的包有不兼容，改成 25.12-SNAPSHOT。
+  TARGET_ARCH: aarch64_cortex-a53
+  SDK_VERSION: 24.10-SNAPSHOT
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax check
+        run: |
+          set -e
+          for f in dnswatchd/files/dnswatchd \
+                   dnswatchd/files/dnswatchd.init \
+                   dnswatchd/files/dnswatchd.uci-defaults; do
+            echo "== $f"
+            sh -n "$f"
+          done
+          echo "all scripts OK"
+
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: './dnswatchd/files'
+          severity: warning
+        continue-on-error: true
+
+  build:
+    name: Build ipk
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build packages
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ env.TARGET_ARCH }}
+          SDK_VERSION: ${{ env.SDK_VERSION }}
+          FEEDNAME: ${{ env.FEED_NAME }}
+          PACKAGES: dnswatchd luci-app-dnswatchd
+          INDEX: 1
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          find bin/packages -name '*.ipk' -exec cp {} out/ \;
+          ls -la out/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ipk-${{ env.TARGET_ARCH }}
+          path: out/*.ipk
+          if-no-files-found: error
+
+      - name: Upload to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.ipk
+          generate_release_notes: true
+
+  feed:
+    name: Publish opkg feed
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ipk-${{ env.TARGET_ARCH }}
+          path: ipk
+
+      - name: Build feed index
+        run: |
+          set -e
+          mkdir -p public/ipk public/${{ env.TARGET_ARCH }}
+          cp ipk/*.ipk public/${{ env.TARGET_ARCH }}/
+          cd public/${{ env.TARGET_ARCH }}
+          for f in *.ipk; do
+            ar -x "$f" 2>/dev/null || continue
+            tar -xzf control.tar.gz ./control 2>/dev/null || tar -xzf control.tar.gz control 2>/dev/null || true
+            if [ -f ./control ]; then
+              size=$(stat -c%s "$f")
+              sha=$(sha256sum "$f" | awk '{print $1}')
+              cat ./control
+              echo "Filename: ${{ env.TARGET_ARCH }}/$f"
+              echo "Size: $size"
+              echo "SHA256sum: $sha"
+              echo ""
+            fi
+            rm -f ./control ./control.tar.gz ./data.tar.gz ./debian-binary
+          done > Packages
+          gzip -kf Packages
+
+      - name: Write opkg feed config
+        run: |
+          cat > public/dnswatchd.conf <<EOF
+          src/gz dnswatchd https://${{ github.repository_owner }}.github.io/${GITHUB_REPOSITORY#*/}/${{ env.TARGET_ARCH }}
+          EOF
+          cat public/dnswatchd.conf
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          keep_files: false

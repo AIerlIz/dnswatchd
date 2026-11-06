@@ -1,0 +1,13 @@
+{
+	"admin/services/dnswatchd": {
+		"title": "DNS Watchdog",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "dnswatchd/main"
+		},
+		"depends": {
+			"acl": [ "luci-app-dnswatchd" ]
+		}
+	}
+}

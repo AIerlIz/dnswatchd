@@ -1,0 +1,18 @@
+{
+	"luci-app-dnswatchd": {
+		"description": "Grant access to DNS Watchdog",
+		"read": {
+			"ubus": {
+				"service": [ "list" ],
+				"uci": [ "get", "show" ]
+			},
+			"uci": [ "dnswatchd" ]
+		},
+		"write": {
+			"uci": [ "dnswatchd" ]
+		},
+		"file": {
+			"/usr/sbin/dnswatchd": [ "exec" ]
+		}
+	}
+}

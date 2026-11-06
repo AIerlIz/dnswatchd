@@ -1,0 +1,28 @@
+# 构建产物
+*.ipk
+*.apk
+bin/
+build_dir/
+staging_dir/
+dl/
+tmp/
+.log
+
+# OpenWrt SDK / ImageBuilder
+.openwrt-sdk/
+lede/
+openwrt/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# 本地测试残留
+*.qcow2
+*.img
