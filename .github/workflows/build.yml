@@ -123,13 +123,15 @@ jobs:
         run: |
           set -e
           mkdir -p out
-          find sdk/bin -name '*.ipk' -exec cp -v {} out/ \;
+          # SDK 的 bin/ 里躺着几千个预编译包（231 MB），只拿我们自己编出来的这两个。
+          find sdk/bin -type f \
+               \( -name 'dnswatchd_*.ipk' -o -name 'luci-app-dnswatchd_*.ipk' \) \
+               -exec cp -v {} out/ \;
           echo "=== out/ ==="
           ls -la out/
-          # 至少要有两个包，否则这次构建视为失败
           count=$(ls out/*.ipk 2>/dev/null | wc -l)
-          echo "collected $count ipk"
-          test "$count" -ge 2
+          echo "collected $count ipk (expected exactly 2)"
+          test "$count" -eq 2
 
       - uses: actions/upload-artifact@v4
         with:
