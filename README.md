@@ -33,9 +33,8 @@ keeps exactly one server in the pool so the choice is never ambiguous.
 # pick your architecture
 opkg print-architecture
 
-cat > /etc/opkg/dnswatchd.conf <<'EOF'
-src/gz dnswatchd https://AIerlIz.github.io/dnswatchd/aarch64_cortex-a53
-EOF
+wget -O /etc/opkg/dnswatchd.conf \
+  https://AIerlIz.github.io/dnswatchd/dnswatchd-aarch64_cortex-a53.conf
 
 opkg update
 opkg install dnswatchd

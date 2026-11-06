@@ -29,9 +29,8 @@ dnsmasq 没有「这个上游在骗我」的概念。dnswatchd 补上这个概�
 ```sh
 opkg print-architecture
 
-cat > /etc/opkg/dnswatchd.conf <<'EOF'
-src/gz dnswatchd https://AIerlIz.github.io/dnswatchd/aarch64_cortex-a53
-EOF
+wget -O /etc/opkg/dnswatchd.conf \
+  https://AIerlIz.github.io/dnswatchd/dnswatchd-aarch64_cortex-a53.conf
 
 opkg update
 opkg install dnswatchd

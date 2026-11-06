@@ -105,12 +105,20 @@ etc/uci-defaults/90-dnswatchd"
 	SCRIPTS="$SCRIPTS $ROOT/usr/lib/dnswatchd/apply.sh $ROOT/usr/lib/dnswatchd/select.sh"
 	SCRIPTS="$SCRIPTS $ROOT/usr/lib/dnswatchd/takeover.sh"
 	SCRIPTS="$SCRIPTS $ROOT/etc/init.d/dnswatchd $ROOT/etc/uci-defaults/90-dnswatchd"
-else
+elif [ "$EXPECT" = "luci-app-dnswatchd" ]; then
 	FILES="www/luci-static/resources/view/dnswatchd/main.js
 usr/share/luci/menu.d/luci-app-dnswatchd.json
 usr/share/rpcd/acl.d/luci-app-dnswatchd.json"
 	EXECUTABLES=""
 	SCRIPTS=""
+else
+	# luci.mk puts each language in its own package; the one thing that must be
+	# there is the compiled catalogue.
+	FILES=""
+	EXECUTABLES=""
+	SCRIPTS=""
+	LMO_COUNT=$(find "$ROOT/usr/lib/lua/luci/i18n" -name '*.lmo' 2>/dev/null | wc -l)
+	check "ships a compiled catalogue" "$LMO_COUNT" "1"
 fi
 
 for f in $FILES; do
