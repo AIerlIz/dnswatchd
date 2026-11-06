@@ -11,9 +11,32 @@
  * 设计要点：
  *  - 常规设置用 NamedSection 绑定 dnswatchd.main
  *  - 上游列表用 GridSection 绑定 dnswatchd.upstream（可增删、可排序）
+ *  - 上方提供「快速添加」：内置几个实测过的公共 DNS，选中后一键建 section
  *  - 运行状态通过 `dnswatchd status` 异步读取，用 modal 展示
- *    （不用 DummyValue：fs.exec 是异步的，DummyValue.cfgvalue 需要同步返回值）
  */
+
+/* ------------------------------------------------------------------ */
+/* 内置预设                                                            */
+/*                                                                     */
+/* 字段：[IP, 探针域名, 说明]                                           */
+/* 延迟数据来自一次实测（2026-11，广东电信），只作参考，实际以现场为准    */
+/* ------------------------------------------------------------------ */
+
+var PRESETS = {
+	baidu:      ['180.76.76.76',   'www.baidu.com', '百度 · 实测 23ms · 支持 ICMP'],
+	yamucloud:  ['1.1.8.8',        'www.baidu.com', '牙木 · 实测 25ms · 支持 ICMP'],
+	volcengine: ['180.184.1.1',    'www.baidu.com', '火山引擎（字节）· 实测 28ms · 支持 ICMP'],
+	tencent:    ['119.29.29.29',   'www.baidu.com', '腾讯 DNSPod · 实测 29ms · 支持 ICMP'],
+	tencent2:   ['182.254.116.116','www.baidu.com', '腾讯 DNSPod 备 · 实测 29ms · 支持 ICMP'],
+	huawei:     ['122.112.208.1',  'www.baidu.com', '华为云 · 实测 32ms · 支持 ICMP'],
+	dnsjia:     ['101.226.4.6',    'www.baidu.com', 'DNS派 · 实测 32ms · 支持 ICMP'],
+	aliyun:     ['223.5.5.5',      'www.baidu.com', '阿里 · 实测 49ms · 支持 ICMP'],
+	aliyun2:    ['223.6.6.6',      'www.baidu.com', '阿里 备 · 实测 47ms · 支持 ICMP'],
+	onefour:    ['114.114.114.114','www.baidu.com', '114DNS · ⚠ 不响应 ICMP，latency 模式会排最后'],
+	onedns:     ['117.50.11.11',   'www.baidu.com', 'OneDNS · ⚠ 不响应 ICMP，latency 模式会排最后'],
+	cloudflare: ['1.1.1.1',        'www.baidu.com', 'Cloudflare · ⚠ 国内被污染，需代理'],
+	google:     ['8.8.8.8',        'www.baidu.com', 'Google · ⚠ 国内被污染，需代理']
+};
 
 return view.extend({
 	/* ------------------------------------------------------------------ */
@@ -22,6 +45,83 @@ return view.extend({
 
 	load: function() {
 		return uci.load('dnswatchd');
+	},
+
+	/* ------------------------------------------------------------------ */
+	/* 快速添加                                                            */
+	/* ------------------------------------------------------------------ */
+
+	handleQuickAdd: function() {
+		/* ListValue 没有绑定到 UCI（字段名以下划线开头，属于纯 UI 控件），
+		   所以从 DOM 里读当前选中值。LuCI 给它的 id 一定含 "_preset"。 */
+		var sel = document.querySelector('select[id*="_preset"]');
+		var key = sel ? sel.value : '';
+
+		if (!key || !PRESETS[key]) {
+			ui.addNotification(null, E('p', {}, _('请先在上面的下拉框里选一个预设。')), 'warning');
+			return;
+		}
+
+		var p = PRESETS[key];
+		var ip = p[0], domain = p[1];
+
+		/* 检查是否已经存在同一个地址，避免重复添加 */
+		var dup = false;
+		uci.sections('dnswatchd', 'upstream').forEach(function(s) {
+			if (uci.get('dnswatchd', s['.name'], 'address') === ip)
+				dup = true;
+		});
+		if (dup) {
+			ui.addNotification(null, E('p', {}, _('上游里已经有 %s 了，不用重复添加。').format(ip)), 'warning');
+			return;
+		}
+
+		/* 自动分配 priority：当前最大值 + 10 */
+		var maxPri = 0;
+		uci.sections('dnswatchd', 'upstream').forEach(function(s) {
+			var v = parseInt(uci.get('dnswatchd', s['.name'], 'priority') || '0', 10);
+			if (v > maxPri) maxPri = v;
+		});
+
+		var sec = uci.add('dnswatchd', 'upstream');
+		uci.set('dnswatchd', sec, 'enabled', '1');
+		uci.set('dnswatchd', sec, 'address', ip);
+		uci.set('dnswatchd', sec, 'port', '53');
+		uci.set('dnswatchd', sec, 'probe_domain', domain);
+		uci.set('dnswatchd', sec, 'expect_cidr', '');
+		uci.set('dnswatchd', sec, 'expect_mode', 'in');
+		uci.set('dnswatchd', sec, 'priority', String(maxPri + 10));
+		uci.save();
+
+		/* 完全不依赖 LuCI 的 uci 模块：
+		   uci.save() 走 rpcd 的 uci/save，uci.apply() 走 uci/apply，
+		   后者稍微慢一点就报 "ubus code 5: No data received" 并且 rollback，
+		   把改动连暂存区一起删掉（实测暂存区变成 0 字节，界面显示
+		   "Unsaved Changes: 7" 但配置里什么都没有）。
+		   这里直接用 `sh -c` 跑一串 uci 命令，落盘和 reload 都是本地的，
+		   失败能看到 stderr 里的真实原因。 */
+		var script = [
+			'uci add dnswatchd upstream',
+			'uci set dnswatchd.@upstream[-1].enabled=1',
+			'uci set dnswatchd.@upstream[-1].address=' + ip,
+			'uci set dnswatchd.@upstream[-1].port=53',
+			'uci set dnswatchd.@upstream[-1].probe_domain=' + domain,
+			"uci set dnswatchd.@upstream[-1].expect_cidr=''",
+			'uci set dnswatchd.@upstream[-1].expect_mode=in',
+			'uci set dnswatchd.@upstream[-1].priority=' + (maxPri + 10),
+			'uci commit dnswatchd',
+			'/etc/init.d/dnswatchd reload >/dev/null 2>&1 || true'
+		].join('\n');
+
+		return fs.exec('/bin/sh', [ '-c', script ]).then(function(res) {
+			if (res.code !== 0)
+				throw new Error((res.stderr || res.stdout || ('exit ' + res.code)).trim());
+			ui.addNotification(null, E('p', {}, _('已添加 %s（优先级 %d）。').format(ip, maxPri + 10)), 'info');
+			window.location.reload();
+		}).catch(function(err) {
+			ui.addNotification(null, E('p', {},
+				_('添加失败：%s').format(err.message || err)), 'danger');
+		});
 	},
 
 	/* ------------------------------------------------------------------ */
@@ -195,6 +295,26 @@ return view.extend({
 		o.inputstyle = 'action';
 		o.onclick = ui.createHandlerFn(this, 'handleShowStatus');
 		o.description = _('显示当前激活的上游、servers-file 内容，以及每个上游的失败/成功计数。');
+
+		/* ---------- 快速添加（必须挂在真实存在的 main section 上，
+		               用虚构 section 名 LuCI 不会渲染任何东西）---------- */
+
+		o = s.option(form.ListValue, '_preset', _('快速添加常用 DNS'),
+			_('选一个预设，点下面的按钮会自动创建对应的上游条目。' +
+			  '添加后可以在「上游 DNS」表格里改优先级、探针域名，或者删除。' +
+			  '想用别的 DNS 直接在表格里点「Add」手填即可。'));
+		o.value('', _('— 请选择 —'));
+		Object.keys(PRESETS).sort(function(a, b) {
+			return PRESETS[a][0].localeCompare(PRESETS[b][0]);
+		}).forEach(function(k) {
+			o.value(k, PRESETS[k][0] + '   ' + PRESETS[k][2]);
+		});
+		o.rmempty = false;
+
+		o = s.option(form.Button, '_add_preset', _(''));
+		o.inputtitle = _('添加到上游列表');
+		o.inputstyle = 'apply';
+		o.onclick = ui.createHandlerFn(this, 'handleQuickAdd');
 
 		/* ---------------------------------------------------------- */
 		/* 上游列表                                                    */
