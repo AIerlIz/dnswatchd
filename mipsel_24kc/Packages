@@ -1,0 +1,80 @@
+Package: dnswatchd
+Version: 0.2.0-r1
+Depends: libc, dnsmasq
+Source: /home/runner/work/dnswatchd/dnswatchd/dnswatchd
+SourceName: dnswatchd
+License: MIT
+LicenseFiles: LICENSE
+Section: net
+SourceDateEpoch: 1793990538
+URL: https://github.com/AIerlIz/dnswatchd
+Maintainer: AIerlIz
+Architecture: mipsel_24kc
+Installed-Size: 133120
+Filename: dnswatchd_0.2.0-r1_mipsel_24kc.ipk
+Size: 45807
+SHA256sum: 51528d8cd0c823a2c1ab07f0b49b25cfe41c3e25086ff867340d5c6e5e4eff95
+Description:  dnswatchd probes the upstream resolvers dnsmasq uses and validates that the
+ answers land in the expected address range (a Clash fake-ip pool for a proxy
+ upstream, outside it for a direct one). When the preferred upstream stops
+ answering correctly it rewrites dnsmasq's --servers-file to the next candidate
+ and reloads it.
+ 
+ Exactly ONE server line is ever written. dnsmasq chooses between its configured
+ upstreams by itself, so a second one — from `list server`, or from
+ resolv.conf.auto while noresolv=0 — means losing control of which resolver
+ answers, which is how real addresses leak into a fake-ip setup.
+ 
+ Installing this package changes nothing about your DNS. `dnswatchd takeover`
+ (or the LuCI wizard) performs the migration, after taking a backup, and
+ `dnswatchd rollback` undoes it.
+
+Package: luci-app-dnswatchd
+Version: 0.2.0-r1
+Depends: libc, dnswatchd, luci-base
+Source: /home/runner/work/dnswatchd/dnswatchd/luci-app-dnswatchd
+SourceName: luci-app-dnswatchd
+License: MIT
+Section: luci
+SourceDateEpoch: 1793990538
+URL: https://github.com/openwrt/luci
+Maintainer: OpenWrt LuCI community
+Architecture: all
+Installed-Size: 30720
+Filename: luci-app-dnswatchd_0.2.0-r1_all.ipk
+Size: 5781
+SHA256sum: 5de2eb7da3386062e5d59be0b4980de129fae23ec1035b3e0ccda11d0e47fd5b
+Description:  Web UI for the dnswatchd DNS upstream watchdog
+
+Package: luci-i18n-dnswatchd-zh-cn
+Version: 26.310.64614~3a73f38
+Depends: libc, luci-app-dnswatchd
+Source: /home/runner/work/dnswatchd/dnswatchd/luci-app-dnswatchd
+SourceName: luci-app-dnswatchd
+License: MIT
+Section: luci
+SourceDateEpoch: 1793987814
+Maintainer: AIerlIz
+Architecture: all
+Installed-Size: 20480
+Filename: luci-i18n-dnswatchd-zh-cn_26.310.64614~3a73f38_all.ipk
+Size: 4016
+SHA256sum: f5587df85bc7763fc0625c553a252d14597ad2bff1f529792530d8d846e5d905
+Description:  Translation for luci-app-dnswatchd - 简体中文 (Simplified Chinese)
+
+Package: luci-i18n-dnswatchd-zh-cn
+Version: 26.310.67338~545d9c5
+Depends: libc, luci-app-dnswatchd
+Source: /home/runner/work/dnswatchd/dnswatchd/luci-app-dnswatchd
+SourceName: luci-app-dnswatchd
+License: MIT
+Section: luci
+SourceDateEpoch: 1793990538
+Maintainer: AIerlIz
+Architecture: all
+Installed-Size: 20480
+Filename: luci-i18n-dnswatchd-zh-cn_26.310.67338~545d9c5_all.ipk
+Size: 4015
+SHA256sum: 6a283b52e0eb00a49cc63fed23b9f344c5c2b620d85ab12d81a38917d4a23d47
+Description:  Translation for luci-app-dnswatchd - 简体中文 (Simplified Chinese)
+
