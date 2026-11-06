@@ -9,12 +9,11 @@ on:
   workflow_dispatch:
 
 env:
-  FEED_NAME: dnswatchd
-  # 两个包都是 PKGARCH:=all（纯脚本，无架构依赖），编一次即通吃所有架构。
-  # 用 24.10 的 SDK 是因为它稳定且自带 luci feed；编出的 all 包在 25.12 上同样可用。
-  # 如果你的目标固件是 25.12 且 24.10 SDK 编出来的包有不兼容，改成 25.12-SNAPSHOT。
-  TARGET_ARCH: aarch64_cortex-a53
+  # 两个包都是 PKGARCH:=all（纯脚本，无架构依赖），用任意 target 的 SDK 都能编，
+  # 编出来的 ipk 在 aarch64 / x86 / mips 上通用。
   SDK_VERSION: 24.10-SNAPSHOT
+  SDK_TARGET: x86/64
+  SDK_ARCH: x86-64
 
 jobs:
   lint:
@@ -34,6 +33,14 @@ jobs:
           done
           echo "all scripts OK"
 
+      - name: JSON / YAML sanity
+        run: |
+          set -e
+          python3 -m json.tool luci-app-dnswatchd/root/usr/share/luci/menu.d/luci-app-dnswatchd.json > /dev/null
+          python3 -m json.tool luci-app-dnswatchd/root/usr/share/rpcd/acl.d/luci-app-dnswatchd.json > /dev/null
+          python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/build.yml'))"
+          echo "json/yaml OK"
+
       - name: ShellCheck
         uses: ludeeus/action-shellcheck@2.0.0
         with:
@@ -48,44 +55,87 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache SDK
+        id: sdk-cache
+        uses: actions/cache@v4
+        with:
+          path: sdk
+          key: sdk-${{ env.SDK_VERSION }}-${{ env.SDK_ARCH }}-v1
+
+      - name: Download SDK
+        if: steps.sdk-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          URL="https://downloads.openwrt.org/releases/${SDK_VERSION}/targets/${SDK_TARGET}/openwrt-sdk-${SDK_VERSION}-${SDK_ARCH}_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          echo "downloading $URL"
+          curl -fsSL -o sdk.tar.zst "$URL"
+          ls -lh sdk.tar.zst
+          mkdir -p sdk
+          # 不用 tar --use-compress-program：ubuntu-latest 的 tar 对 .zst 支持不稳，
+          # 显式走 zstd -d | tar -x 更可靠
+          zstd -d -c sdk.tar.zst | tar -x -C sdk --strip-components=1
+          rm -f sdk.tar.zst
+          ls sdk | head
+
+      - name: Verify SDK
+        run: |
+          test -f sdk/rules.mk && echo "SDK looks valid"
+          test -d sdk/scripts && echo "scripts/ present"
+          test -f sdk/feeds.conf.default && echo "feeds.conf.default present"
+
+      - name: Add our feed
+        run: |
+          set -e
+          echo "src-link dnswatchd $GITHUB_WORKSPACE" >> sdk/feeds.conf.default
+          cat sdk/feeds.conf.default
+
+      - name: Update and install feeds
+        working-directory: sdk
+        run: |
+          set -e
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure
+        working-directory: sdk
+        run: |
+          set -e
+          make defconfig
+          grep -E 'CONFIG_PACKAGE_(dnswatchd|luci-app-dnswatchd)' .config || true
+
       - name: Build packages
-        uses: openwrt/gh-action-sdk@main
-        env:
-          ARCH: ${{ env.TARGET_ARCH }}
-          SDK_VERSION: ${{ env.SDK_VERSION }}
-          FEEDNAME: ${{ env.FEED_NAME }}
-          PACKAGES: dnswatchd luci-app-dnswatchd
-          INDEX: 1
+        working-directory: sdk
+        run: |
+          set -e
+          make package/dnswatchd/compile V=s -j"$(nproc)"
+          make package/luci-app-dnswatchd/compile V=s -j"$(nproc)"
+
+      - name: Show results
+        working-directory: sdk
+        run: |
+          echo "=== bin/packages tree ==="
+          find bin/packages -type f -name '*.ipk' -o -type d -name 'dnswatchd*' 2>/dev/null | head -30
+          echo "=== all ipk ==="
+          find bin -name '*.ipk' 2>/dev/null | head -30
+          ls -laR bin/packages 2>/dev/null | head -60
 
       - name: Collect artifacts
         run: |
-          set +e
+          set -e
           mkdir -p out
-
-          echo "=== workspace directories (depth 2) ==="
-          find "$GITHUB_WORKSPACE" -maxdepth 2 -type d 2>/dev/null | head -30
-
-          echo "=== any .ipk under workspace ==="
-          find "$GITHUB_WORKSPACE" -name '*.ipk' 2>/dev/null | head -20
-
-          echo "=== copying ==="
-          find "$GITHUB_WORKSPACE" -name 'dnswatchd*.ipk' -o -name 'luci-app-dnswatchd*.ipk' 2>/dev/null \
-            | while read -r f; do cp -v "$f" out/; done
-
-          if [ -z "$(ls -A out 2>/dev/null)" ]; then
-            echo "=== nothing under workspace, searching whole filesystem ==="
-            find / -name 'dnswatchd*.ipk' -o -name 'luci-app-dnswatchd*.ipk' 2>/dev/null \
-              | head -10 | while read -r f; do cp -v "$f" out/ 2>/dev/null; done
-          fi
-
+          find sdk/bin -name '*.ipk' -exec cp -v {} out/ \;
           echo "=== out/ ==="
           ls -la out/
+          # 至少要有两个包，否则这次构建视为失败
+          count=$(ls out/*.ipk 2>/dev/null | wc -l)
+          echo "collected $count ipk"
+          test "$count" -ge 2
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ipk-${{ env.TARGET_ARCH }}
+          name: ipk
           path: out/*.ipk
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Upload to release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -106,35 +156,35 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: ipk-${{ env.TARGET_ARCH }}
+          name: ipk
           path: ipk
 
       - name: Build feed index
         run: |
           set -e
-          mkdir -p public/ipk public/${{ env.TARGET_ARCH }}
-          cp ipk/*.ipk public/${{ env.TARGET_ARCH }}/
-          cd public/${{ env.TARGET_ARCH }}
+          mkdir -p public/aarch64_cortex-a53
+          cp ipk/*.ipk public/aarch64_cortex-a53/
+          cd public/aarch64_cortex-a53
+          : > Packages
           for f in *.ipk; do
-            ar -x "$f" 2>/dev/null || continue
-            tar -xzf control.tar.gz ./control 2>/dev/null || tar -xzf control.tar.gz control 2>/dev/null || true
+            rm -rf /tmp/ipkx && mkdir -p /tmp/ipkx && cd /tmp/ipkx
+            ar -x "$OLDPWD/$f" 2>/dev/null || true
+            tar -xzf control.tar.gz 2>/dev/null || tar -xzf control.tar.gz ./control 2>/dev/null || true
             if [ -f ./control ]; then
-              size=$(stat -c%s "$f")
-              sha=$(sha256sum "$f" | awk '{print $1}')
               cat ./control
-              echo "Filename: ${{ env.TARGET_ARCH }}/$f"
-              echo "Size: $size"
-              echo "SHA256sum: $sha"
-              echo ""
+              printf 'Filename: aarch64_cortex-a53/%s\n' "$f"
+              printf 'Size: %s\n' "$(stat -c%s "$OLDPWD/$f")"
+              printf 'SHA256sum: %s\n\n' "$(sha256sum "$OLDPWD/$f" | awk '{print $1}')"
             fi
-            rm -f ./control ./control.tar.gz ./data.tar.gz ./debian-binary
-          done > Packages
+            cd "$OLDPWD"
+          done >> Packages
           gzip -kf Packages
+          ls -la
 
       - name: Write opkg feed config
         run: |
           cat > public/dnswatchd.conf <<EOF
-          src/gz dnswatchd https://${{ github.repository_owner }}.github.io/${GITHUB_REPOSITORY#*/}/${{ env.TARGET_ARCH }}
+          src/gz dnswatchd https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/aarch64_cortex-a53
           EOF
           cat public/dnswatchd.conf
 
@@ -143,4 +193,3 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./public
-          keep_files: false
