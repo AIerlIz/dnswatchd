@@ -77,43 +77,71 @@ note "version" "$(field Version)"
 note "depends" "$(field Depends)"
 
 ROOT="$WORK/data"
-for f in usr/sbin/dnswatchd \
-         usr/libexec/dnswatchd/probe \
-         usr/libexec/rpcd/dnswatchd \
-         usr/lib/dnswatchd/common.sh \
-         usr/lib/dnswatchd/config.sh \
-         usr/lib/dnswatchd/state.sh \
-         usr/lib/dnswatchd/probe.sh \
-         usr/lib/dnswatchd/apply.sh \
-         usr/lib/dnswatchd/select.sh \
-         usr/lib/dnswatchd/takeover.sh \
-         etc/init.d/dnswatchd \
-         etc/config/dnswatchd \
-         etc/uci-defaults/90-dnswatchd; do
-	[ -f "$ROOT/$f" ] || { note "missing $f" "FAIL"; fail=$((fail + 1)); }
+
+if [ "$EXPECT" = "dnswatchd" ]; then
+	FILES="usr/sbin/dnswatchd
+usr/libexec/dnswatchd/probe
+usr/libexec/rpcd/dnswatchd
+usr/lib/dnswatchd/common.sh
+usr/lib/dnswatchd/config.sh
+usr/lib/dnswatchd/state.sh
+usr/lib/dnswatchd/probe.sh
+usr/lib/dnswatchd/apply.sh
+usr/lib/dnswatchd/select.sh
+usr/lib/dnswatchd/takeover.sh
+etc/init.d/dnswatchd
+etc/config/dnswatchd
+etc/uci-defaults/90-dnswatchd"
+
+	EXECUTABLES="usr/sbin/dnswatchd
+usr/libexec/dnswatchd/probe
+usr/libexec/rpcd/dnswatchd
+etc/init.d/dnswatchd
+etc/uci-defaults/90-dnswatchd"
+
+	SCRIPTS="$ROOT/usr/sbin/dnswatchd $ROOT/usr/libexec/rpcd/dnswatchd"
+	SCRIPTS="$SCRIPTS $ROOT/usr/lib/dnswatchd/common.sh $ROOT/usr/lib/dnswatchd/config.sh"
+	SCRIPTS="$SCRIPTS $ROOT/usr/lib/dnswatchd/state.sh $ROOT/usr/lib/dnswatchd/probe.sh"
+	SCRIPTS="$SCRIPTS $ROOT/usr/lib/dnswatchd/apply.sh $ROOT/usr/lib/dnswatchd/select.sh"
+	SCRIPTS="$SCRIPTS $ROOT/usr/lib/dnswatchd/takeover.sh"
+	SCRIPTS="$SCRIPTS $ROOT/etc/init.d/dnswatchd $ROOT/etc/uci-defaults/90-dnswatchd"
+else
+	FILES="htdocs/luci-static/resources/view/dnswatchd/main.js
+usr/share/luci/menu.d/luci-app-dnswatchd.json
+usr/share/rpcd/acl.d/luci-app-dnswatchd.json"
+	EXECUTABLES=""
+	SCRIPTS=""
+fi
+
+for f in $FILES; do
+	[ -f "$ROOT/$f" ] || { note "missing /$f" "FAIL"; fail=$((fail + 1)); }
 done
 
-for f in usr/sbin/dnswatchd usr/libexec/dnswatchd/probe usr/libexec/rpcd/dnswatchd \
-         etc/init.d/dnswatchd etc/uci-defaults/90-dnswatchd; do
+for f in $EXECUTABLES; do
 	[ -x "$ROOT/$f" ] && note "executable /$f" "ok" ||
 		{ note "executable /$f" "FAIL"; fail=$((fail + 1)); }
 done
 
-check "conffiles protects the config" \
-	"$(sed -n 's|^/etc/config/dnswatchd$|yes|p' "$WORK/conffiles" 2>/dev/null)" "yes"
+if [ "$EXPECT" = "dnswatchd" ]; then
+	check "conffiles protects the config" \
+		"$(sed -n 's|^/etc/config/dnswatchd$|yes|p' "$WORK/conffiles" 2>/dev/null)" "yes"
+fi
 
-# Every installed shell script must at least parse.
-for f in "$ROOT/usr/sbin/dnswatchd" "$ROOT/usr/libexec/rpcd/dnswatchd" \
-         "$ROOT"/usr/lib/dnswatchd/*.sh "$ROOT/etc/init.d/dnswatchd" \
-         "$ROOT/etc/uci-defaults/90-dnswatchd"; do
+# Informational: prove (or disprove) that luci.mk picked the po files up.
+if [ "$EXPECT" != "dnswatchd" ]; then
+	LMO=$(find "$ROOT/usr/lib/lua/luci/i18n" -name '*.lmo' 2>/dev/null | head -3 | tr '\n' ' ')
+	note "translation catalogues" "${LMO:-none found}"
+fi
+
+for f in $SCRIPTS; do
 	[ -f "$f" ] || continue
 	sh -n "$f" 2>/dev/null || { note "syntax $(basename "$f")" "FAIL"; fail=$((fail + 1)); }
 done
-note "installed scripts parse" "ok"
+[ -n "$SCRIPTS" ] && note "installed scripts parse" "ok"
 
 # The probe must be statically linked: a dynamic binary would pin the package to
 # one libc version and defeat the single-build-for-three-releases plan.
-if command -v file >/dev/null 2>&1; then
+if command -v file >/dev/null 2>&1 && [ "$EXPECT" = "dnswatchd" ]; then
 	if file "$ROOT/usr/libexec/dnswatchd/probe" | grep -q 'statically linked'; then
 		note "probe is statically linked" "ok"
 	else
