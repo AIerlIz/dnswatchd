@@ -162,14 +162,14 @@ jobs:
           set -e
           mkdir -p out
           for ipk in $(find sdk/bin \( -name 'dnswatchd_*.ipk' -o -name 'luci-app-dnswatchd_*.ipk' \
-                        -o -name 'luci-i18n-dnswatchd_*.ipk' \)); do
+                        -o -name 'luci-i18n-dnswatchd-*.ipk' \)); do
             arch=$(sh scripts/ipk-field.sh "$ipk" Architecture)
             test -n "$arch" || { echo "no Architecture in $ipk" >&2; exit 1; }
             mkdir -p "out/$arch"
             cp -v "$ipk" "out/$arch/"
           done
           test -n "$(find out -name '*.ipk')" || { echo "no package produced" >&2; exit 1; }
-          test -n "$(find out -name 'luci-i18n-dnswatchd_*.ipk')" || {
+          test -n "$(find out -name 'luci-i18n-dnswatchd-*.ipk')" || {
             echo "the zh_Hans translation package was not produced" >&2; exit 1; }
 
           fail=0
