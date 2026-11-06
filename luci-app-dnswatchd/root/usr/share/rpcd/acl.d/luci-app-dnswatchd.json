@@ -3,36 +3,17 @@
 		"description": "Grant access to DNS Watchdog",
 		"read": {
 			"ubus": {
-				"service": [
-					"list"
-				],
-				"uci": [
-					"get",
-					"show"
-				]
+				"service": [ "list" ],
+				"uci": [ "get", "show" ],
+				"dnswatchd": [ "status", "probe" ]
 			},
-			"uci": [
-				"dnswatchd"
-			]
+			"uci": [ "dnswatchd" ]
 		},
 		"write": {
-			"uci": [
-				"dnswatchd"
-			]
-		},
-		"file": {
-			"/usr/sbin/dnswatchd": [
-				"exec"
-			],
-			"/sbin/uci": [
-				"exec"
-			],
-			"/etc/init.d/dnswatchd": [
-				"exec"
-			],
-			"/bin/sh": [
-				"exec"
-			]
+			"ubus": {
+				"dnswatchd": [ "once", "switch", "takeover", "rollback", "apply" ]
+			},
+			"uci": [ "dnswatchd" ]
 		}
 	}
 }

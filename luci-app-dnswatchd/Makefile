@@ -11,12 +11,12 @@ LUCI_DEPENDS:=+dnswatchd +luci-base
 LUCI_PKGARCH:=all
 
 PKG_NAME:=luci-app-dnswatchd
-PKG_VERSION:=0.1.0
+PKG_VERSION:=0.2.0
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
-PKG_MAINTAINER:=dnswatchd contributors
+PKG_MAINTAINER:=AIerlIz
 
+# Translations live in ./po/<lang>/dnswatchd.po and are picked up by luci.mk.
 include $(TOPDIR)/feeds/luci/luci.mk
 
-# call BuildPackage - OpenWrt buildroot signature
 $(eval $(call BuildPackage,$(PKG_NAME)))

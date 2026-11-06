@@ -1,0 +1,150 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+#
+# dnswatchd - rpcd plugin
+#
+# This replaces the 0.1.x approach of handing LuCI an exec grant on /bin/sh.
+# rpcd invokes us as `call <method>` with the request JSON on stdin and expects
+# exactly one bare JSON object on stdout (see rpcd plugin.c:rpc_plugin_call).
+#
+# Arguments are re-validated here even though the caller is trusted: the ACL
+# decides who may call a method, but the shape of the values still has to be
+# safe before they reach the CLI.
+
+DN=${DNSWATCHD_BIN:-/usr/sbin/dnswatchd}
+
+# json_val <json> <key> -> value without surrounding quotes, "" when absent
+json_val() {
+	printf '%s' "$1" | tr -d '\n' | sed -n \
+		's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/p' |
+		head -1
+}
+
+is_uint() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; return 0; }
+
+is_ipv4() {
+	case "$1" in ''|*[!0-9.]*) return 1 ;; esac
+	_ifs=$IFS; IFS=.
+	# shellcheck disable=SC2086
+	set -- $1
+	IFS=$_ifs
+	[ $# -eq 4 ] || return 1
+	for _o in "$@"; do
+		is_uint "$_o" || return 1
+		[ "$_o" -le 255 ] || return 1
+	done
+	return 0
+}
+
+fail() {
+	printf '{"ok":false,"error":"%s"}\n' "$1"
+	exit 0
+}
+
+run_msg() {
+	# $1 = command, rest = args; wraps the CLI's exit status into JSON.
+	_cmd=$1
+	shift
+	_out=$("$DN" "$_cmd" "$@" 2>/dev/null)
+	_rc=$?
+	if [ "$_rc" -eq 0 ]; then
+		printf '{"ok":true,"message":"%s"}\n' "$(printf '%s' "$_out" | tr -d '\n')"
+	else
+		printf '{"ok":false,"message":"%s"}\n' "$(printf '%s' "$_out" | tr -d '\n')"
+	fi
+}
+
+case "$1" in
+list)
+	cat <<'EOF'
+{
+	"status": {},
+	"once": {},
+	"probe": {},
+	"switch": {},
+	"takeover": {},
+	"rollback": {},
+	"apply": {}
+}
+EOF
+	;;
+
+call)
+	_method=$2
+	_input=$(cat)
+
+	case "$_method" in
+	status)
+		exec "$DN" status --json
+		;;
+
+	once)
+		exec "$DN" once --json
+		;;
+
+	apply)
+		run_msg apply
+		;;
+
+	takeover)
+		run_msg takeover
+		;;
+
+	rollback)
+		run_msg rollback
+		;;
+
+	switch)
+		_sec=$(json_val "$_input" section)
+		case "$_sec" in ''|*[!A-Za-z0-9_.-]*) fail "invalid section" ;; esac
+		# rc 0 and rc 1 both print their own JSON object; only rc>=2 means the
+		# CLI could not run at all.
+		out=$("$DN" switch "$_sec" 2>/dev/null)
+		rc=$?
+		if [ "$rc" -le 1 ] && [ -n "$out" ]; then
+			printf '%s\n' "$out"
+		else
+			printf '{"ok":false,"error":"switch failed"}\n'
+		fi
+		;;
+
+	probe)
+		_addr=$(json_val "$_input" address)
+		_dom=$(json_val "$_input" domain)
+		_cidr=$(json_val "$_input" cidr)
+		_mode=$(json_val "$_input" mode)
+		_port=$(json_val "$_input" port)
+
+		is_ipv4 "$_addr" || fail "invalid address"
+		case "$_dom" in ''|*[!A-Za-z0-9._-]*) fail "invalid domain" ;; esac
+		[ -n "$_cidr" ] && case "$_cidr" in
+			*[!0-9./]*) fail "invalid cidr" ;;
+		esac
+		case "$_mode" in
+			''|in|not-in|any) ;;
+			*) fail "invalid mode" ;;
+		esac
+		[ -n "$_port" ] && { is_uint "$_port" || fail "invalid port"; }
+		[ -n "$_port" ] || _port=53
+		[ -n "$_mode" ] || _mode=any
+
+		out=$("$DN" probe "$_addr" "$_dom" "$_cidr" "$_mode" "$_port" 2>/dev/null)
+		rc=$?
+		if [ "$rc" -le 1 ] && [ -n "$out" ]; then
+			printf '%s\n' "$out"
+		else
+			printf '{"ok":false,"class":"probe-failed"}\n'
+		fi
+		;;
+
+	*)
+		fail "unknown method"
+		;;
+	esac
+	;;
+
+*)
+	echo "usage: $0 {list|call <method>}" >&2
+	exit 1
+	;;
+esac

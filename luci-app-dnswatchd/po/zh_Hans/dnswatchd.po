@@ -1,0 +1,425 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-dnswatchd 0.2.0\n"
+"Report-Msgid-Bugs-To: https://github.com/AIerlIz/dnswatchd/issues\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Language: zh_Hans\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Upstream"
+msgstr "上游"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Address"
+msgstr "地址"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Priority"
+msgstr "优先级"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "State"
+msgstr "状态"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Fails"
+msgstr "失败"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Oks"
+msgstr "成功"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "RTT"
+msgstr "往返延迟"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "No upstream configured yet."
+msgstr "还没有配置上游。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Watchdog"
+msgstr "守护进程"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "enabled"
+msgstr "已启用"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "disabled"
+msgstr "已禁用"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Managing dnsmasq"
+msgstr "接管状态"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "yes"
+msgstr "是"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "no"
+msgstr "否"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Active upstream"
+msgstr "当前上游"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "none"
+msgstr "无"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "servers-file"
+msgstr "servers-file"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "in use"
+msgstr "正在使用"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "not used by dnsmasq"
+msgstr "dnsmasq 未使用"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "dnsmasq upstreams"
+msgstr "dnsmasq 上游"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "resolv.conf ignored"
+msgstr "已忽略 resolv.conf"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Probing"
+msgstr "正在探测"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Running one round against every upstream…"
+msgstr "正在对所有上游跑一轮探测…"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Round skipped: %s"
+msgstr "已跳过本轮：%s"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Round finished. Reloading the page to show the new state."
+msgstr "本轮结束，正在刷新页面显示最新状态。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Round failed: %s"
+msgstr "本轮失败：%s"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "This rewrites dnsmasq settings so that dnswatchd owns the upstream:"
+msgstr "这会改写 dnsmasq 设置，让 dnswatchd 接管上游："
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Current dnsmasq upstreams (%s) are backed up, then removed."
+msgstr "现有的 dnsmasq 上游（%s）会先备份再移除。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "servers-file is set to %s and keeps exactly one server line."
+msgstr "servers-file 会设为 %s，并且只保留一行 server。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "resolv.conf is ignored by dnsmasq (noresolv=1), so the ISP resolvers cannot answer behind your back."
+msgstr "dnsmasq 会忽略 resolv.conf（noresolv=1），运营商下发的 DNS 无法再偷偷应答。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "The ISP resolvers come back as an explicit, lowest-priority upstream instead."
+msgstr "运营商的 DNS 会改成一条显式的、最低优先级的上游。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "`dnswatchd rollback` undoes all of it."
+msgstr "`dnswatchd rollback` 可以全部撤销。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Cancel"
+msgstr "取消"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Done"
+msgstr "完成"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Take over"
+msgstr "接管"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Take over DNS management"
+msgstr "接管 DNS 管理"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Give DNS back"
+msgstr "交还 DNS"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Restores the dnsmasq upstreams saved by the last takeover and disables the watchdog."
+msgstr "恢复上次接管时保存的 dnsmasq 上游，并停用守护进程。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Roll back"
+msgstr "回滚"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Now using %s."
+msgstr "已切换到 %s。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Switch failed: %s"
+msgstr "切换失败：%s"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Pick a preset first."
+msgstr "请先选择一个预设。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "%s is already in the list."
+msgstr "%s 已经在列表里了。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Apply failed"
+msgstr "应用失败"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Add failed: %s"
+msgstr "添加失败：%s"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "DNS Watchdog"
+msgstr "DNS 看门狗"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Probes the upstream resolvers dnsmasq uses, checks that the answers land in the expected range, and switches to the next candidate when they do not."
+msgstr "探测 dnsmasq 使用的上游解析器，校验应答是否落在预期网段内，不符合时切换到下一个候选。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Status"
+msgstr "状态"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Run one round"
+msgstr "立即跑一轮"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Probes every upstream once and applies the result. Honours “dry run”."
+msgstr "对所有上游探测一次并应用结果。遵守「仅记录」设置。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Take over DNS"
+msgstr "接管 DNS"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Point dnsmasq at the servers-file and stop it from using resolv.conf."
+msgstr "让 dnsmasq 使用 servers-file，并停止读取 resolv.conf。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Undo the last takeover and disable the watchdog."
+msgstr "撤销上次接管并停用守护进程。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Settings"
+msgstr "设置"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Enable"
+msgstr "启用"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Master switch. Takeover turns this on for you."
+msgstr "总开关。接管时会自动打开。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Dry run"
+msgstr "仅记录（dry run）"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Log the decisions but never rewrite the servers-file."
+msgstr "只记录判定结果，不实际改写 servers-file。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Interval"
+msgstr "探测间隔"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Seconds between rounds. Minimum 5."
+msgstr "每轮之间的秒数，最小 5。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Probe deadline"
+msgstr "探测超时"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Milliseconds per DNS query. A dead upstream costs at most this much per round."
+msgstr "单次 DNS 查询的毫秒上限。一个死掉的上游每轮最多消耗这么多时间。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Failures before DOWN"
+msgstr "判定 DOWN 的连续失败次数"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Consecutive failures before an upstream is considered down."
+msgstr "连续失败多少次后判定为不可用。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Successes before UP"
+msgstr "判定 UP 的连续成功次数"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Consecutive successes before a downed upstream is trusted again."
+msgstr "宕机的上游要连续成功多少次才重新被信任。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "dnsmasq servers-file"
+msgstr "dnsmasq 的 servers-file"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Must match the servers-file configured for dnsmasq. Takeover sets both."
+msgstr "必须与 dnsmasq 的 servers-file 一致。接管时两处会一起设置。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Selection"
+msgstr "选择策略"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "By priority (predictable)"
+msgstr "按优先级（可预测）"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "By measured round-trip"
+msgstr "按实测往返延迟"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Priority: the lowest priority number that is up wins. Latency: the fastest DNS round-trip wins, if it beats the incumbent by the margin."
+msgstr "按优先级：数字最小且可用的胜出。按延迟：DNS 往返最快的胜出，且要比当前快出阈值百分比。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Switch margin"
+msgstr "切换阈值"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Percent. Only used by the latency selection."
+msgstr "百分比，仅「按延迟」时使用。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Rounds to win"
+msgstr "连续胜出轮数"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Only used by the latency selection. How many rounds in a row a challenger must win."
+msgstr "仅「按延迟」时使用。挑战者要连续赢多少轮。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Round budget"
+msgstr "单轮预算"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Percent of the interval a round may spend probing before it gives up on the rest."
+msgstr "一轮最多花掉间隔的百分之几来探测，超出就放弃剩余上游。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Write to syslog"
+msgstr "写入系统日志"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Verbose"
+msgstr "详细模式"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Also log the uneventful rounds."
+msgstr "连无事的轮次也记录。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Add a known public resolver"
+msgstr "添加常用公共 DNS"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Adds an upstream entry with expect_mode=any. Edit it afterwards to match your setup."
+msgstr "新增一条 expect_mode=any 的上游，之后可以按自己的环境修改。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "— choose —"
+msgstr "— 请选择 —"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Add"
+msgstr "添加"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Upstream resolvers"
+msgstr "上游解析器"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Every enabled upstream is probed each round. Exactly one of them ends up in the servers-file — dnsmasq picks between upstreams by itself, so a second one would mean losing control of which resolver answers."
+msgstr "每轮都会探测所有启用的上游。最终只有一条会写进 servers-file——dnsmasq 会自己在多个上游之间挑，多一条就意味着无法控制是谁在应答。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Port"
+msgstr "端口"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Source"
+msgstr "来源"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Fixed address"
+msgstr "固定地址"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "From resolv.conf.auto"
+msgstr "来自 resolv.conf.auto"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "“From resolv.conf.auto” picks up the ISP resolvers netifd hands out, one upstream per address."
+msgstr "「来自 resolv.conf.auto」会读取 netifd 下发的运营商 DNS，每个地址生成一条上游。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Probe domain"
+msgstr "探针域名"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Queried as an A record. For a fake-ip proxy upstream use a name only the proxy can answer."
+msgstr "以 A 记录查询。作为 fake-ip 代理上游时，用只有代理能解析的域名。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Expectation"
+msgstr "判定方式"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Every answer inside the range"
+msgstr "所有应答都在网段内"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Every answer outside the range"
+msgstr "所有应答都在网段外"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Any answer at all"
+msgstr "只要能解析"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Expected range"
+msgstr "期望网段"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "CIDR, e.g. 198.18.0.0/16 for a Clash fake-ip pool. Ignored when the expectation is “any answer”."
+msgstr "CIDR，例如 Clash fake-ip 池的 198.18.0.0/16。判定方式为「只要能解析」时忽略。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Lower wins."
+msgstr "数字越小越优先。"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Enabled"
+msgstr "启用"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Use now"
+msgstr "立即使用"
+
+#: htdocs/luci-static/resources/view/dnswatchd/main.js
+msgid "Force this upstream into the servers-file, bypassing the selection."
+msgstr "跳过选择策略，直接把这条上游写进 servers-file。"
