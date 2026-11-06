@@ -55,12 +55,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache SDK
+      - name: Cache SDK tarball
         id: sdk-cache
         uses: actions/cache@v4
         with:
-          path: sdk
-          key: sdk-${{ env.SDK_VERSION }}-${{ env.SDK_ARCH }}-v1
+          # 只缓存原始 tar 包，不缓存解压后的 SDK。
+          # 缓存解压目录会把上次的 feeds.conf.default 修改（我们追加的 src-link）
+          # 和 feeds/ 的 git 状态一起带回来，导致下次 feeds update 报 exit 25。
+          path: sdk.tar.zst
+          key: sdk-tar-${{ env.SDK_VERSION }}-${{ env.SDK_ARCH }}-v1
 
       - name: Download SDK
         if: steps.sdk-cache.outputs.cache-hit != 'true'
@@ -70,24 +73,30 @@ jobs:
           echo "downloading $URL"
           curl -fsSL -o sdk.tar.zst "$URL"
           ls -lh sdk.tar.zst
-          mkdir -p sdk
-          # 不用 tar --use-compress-program：ubuntu-latest 的 tar 对 .zst 支持不稳，
-          # 显式走 zstd -d | tar -x 更可靠
+
+      - name: Extract SDK
+        run: |
+          set -e
+          rm -rf sdk && mkdir -p sdk
+          # 不用 tar --use-compress-program：ubuntu-latest 的 tar 对 .zst 支持不稳
           zstd -d -c sdk.tar.zst | tar -x -C sdk --strip-components=1
-          rm -f sdk.tar.zst
           ls sdk | head
 
       - name: Verify SDK
         run: |
-          test -f sdk/rules.mk && echo "SDK looks valid"
-          test -d sdk/scripts && echo "scripts/ present"
-          test -f sdk/feeds.conf.default && echo "feeds.conf.default present"
+          set -e
+          test -f sdk/rules.mk && echo "rules.mk OK"
+          test -d sdk/scripts && echo "scripts/ OK"
+          test -f sdk/feeds.conf.default && echo "feeds.conf.default OK"
 
       - name: Add our feed
         run: |
           set -e
-          echo "src-link dnswatchd $GITHUB_WORKSPACE" >> sdk/feeds.conf.default
-          cat sdk/feeds.conf.default
+          cd sdk
+          # 幂等：先删掉同名行再加，避免重复
+          sed -i '\|^src-link dnswatchd |d' feeds.conf.default
+          echo "src-link dnswatchd $GITHUB_WORKSPACE" >> feeds.conf.default
+          cat feeds.conf.default
 
       - name: Update and install feeds
         working-directory: sdk
