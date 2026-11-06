@@ -151,8 +151,10 @@ jobs:
           # package silently does not exist.
           make package/luci-base/host/compile V=s -j"$(nproc)"
           make package/dnswatchd/compile V=s -j"$(nproc)"
+          # This one target also builds the generated luci-i18n-dnswatchd-zh-cn
+          # package: luci.mk defines it inside the same Makefile, and a
+          # sub-package has no directory of its own to name on the command line.
           make package/luci-app-dnswatchd/compile V=s -j"$(nproc)"
-          make package/luci-i18n-dnswatchd-zh-cn/compile V=s -j"$(nproc)"
 
       - name: Collect
         id: collect
@@ -167,6 +169,8 @@ jobs:
             cp -v "$ipk" "out/$arch/"
           done
           test -n "$(find out -name '*.ipk')" || { echo "no package produced" >&2; exit 1; }
+          test -n "$(find out -name 'luci-i18n-dnswatchd_*.ipk')" || {
+            echo "the zh_Hans translation package was not produced" >&2; exit 1; }
 
           fail=0
           set +e
