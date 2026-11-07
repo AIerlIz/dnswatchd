@@ -149,7 +149,17 @@ class Smoke:
         url = (f"https://downloads.openwrt.org/releases/{self.args.version}"
                f"/targets/x86/64/{os.path.basename(gz)}")
         log(f"downloading {url}")
-        urllib.request.urlretrieve(url, gz)
+        last = None
+        for attempt in range(1, 4):
+            try:
+                urllib.request.urlretrieve(url, gz)
+                break
+            except Exception as exc:            # network flake, not a decision
+                last = exc
+                log(f"download attempt {attempt} failed: {exc}")
+                time.sleep(5 * attempt)
+        else:
+            raise SystemExit(f"could not download {url}: {last}")
 
         # A captive portal or an error page is a 200 with HTML in it; say so
         # instead of letting gzip raise "Not a gzipped file".

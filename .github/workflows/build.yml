@@ -118,7 +118,10 @@ jobs:
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           set -e
-          curl -fsSL -o sdk.tar.zst \
+          # curl 92 (HTTP/2 stream error) shows up often enough against the CDN
+          # to fail a build for no reason. Retry, and stay on HTTP/1.1.
+          curl -fL --http1.1 --retry 5 --retry-delay 5 --retry-all-errors \
+            -o sdk.tar.zst \
             "https://downloads.openwrt.org/releases/${SDK_VERSION}/targets/${{ matrix.target }}/${{ steps.sdk.outputs.file }}"
           ls -lh sdk.tar.zst
 
