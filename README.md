@@ -187,6 +187,16 @@ sh tests/core/run.sh
 sh tests/core/takeover.sh
 ```
 
+The CI also boots a real OpenWrt image under QEMU and runs
+`takeover` → `once` → `rollback` against the built packages, because the parts
+that only break on a real router — the ujail mount for the servers-file,
+dnsmasq reloading it, procd starting the daemon after dnsmasq — are invisible to
+unit tests:
+
+```sh
+python3 scripts/qemu-smoke.py --ipk-dir /path/to/ipks --version 24.10.8
+```
+
 ## More
 
 - [docs/DESIGN.md](docs/DESIGN.md) — the invariants and why they exist
